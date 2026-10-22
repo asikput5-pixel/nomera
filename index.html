@@ -202,7 +202,7 @@ const REGIONS=[['777',2.3],['77',1.6],['177',1.6],['199',1.6],['88',1.2],['97',1
 
 let S={bal:5000000,xp:0,lvl:1,streak:1,type:'civil',country:'RU',region:null,bet:0,inv:[],hist:[],daily:0,free:0,luck:0,show:[],spins:0,bp:0,gc:0,ach:[]};
 try{const x=localStorage.getItem('namerok');if(x)S=Object.assign(S,JSON.parse(x))}catch(e){}
-const save=()=>{S.ts=Date.now();try{localStorage.setItem('namerok',JSON.stringify(S))}catch(e){}try{cloud()}catch(e){}};
+const save=()=>{S.ts=Date.now();try{localStorage.setItem('namerok',JSON.stringify(S))}catch(e){}try{cloud()}catch(e){}try{window.namerokCloudSave&&window.namerokCloudSave(S)}catch(e){}};
 const rnd=n=>Math.floor(Math.random()*n);
 const pick=s=>s[rnd(s.length)];
 const D=()=>rnd(10);
@@ -404,6 +404,44 @@ A.a12=()=>{AUTH=false;close()};
 var DBH=null,UID=null,CAN=false,CFG={},TOP=[],LOTS=[],SRV='off',pushT;
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
 const nick=()=>S.nick||('Игрок '+String(UID||'').slice(0,4));
+// Neon-backed sync: only profile/collection/history/progression metadata are persisted.
+let syncTimer=null, syncBusy=false, cloudReady=false;
+function telegramInitData(){return tgApp && typeof tgApp.initData==='string' ? tgApp.initData : '';}
+function localCloudPayload(state){return {nick:state.nick||'',inv:(state.inv||[]).slice(0,500).map(x=>({num:String(x.num||''),r:Number(x.r)||0,cls:String(x.cls||'civil')})),hist:(state.hist||[]).slice(0,12).map(x=>({num:String(x.num||''),r:Number(x.r)||0})),spins:Number(state.spins)||0,xp:Number(state.xp)||0,lvl:Number(state.lvl)||1};}
+window.namerokCloudSave=function(state){
+  if(!cloudReady || !telegramInitData()) return;
+  clearTimeout(syncTimer);
+  syncTimer=setTimeout(async()=>{
+    if(syncBusy)return; syncBusy=true;
+    try{const res=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:telegramInitData(),save:localCloudPayload(state)})});
+      if(!res.ok)throw new Error('sync failed'); const data=await res.json(); if(data.updatedAt)state.ts=data.updatedAt; try{localStorage.setItem('namerok',JSON.stringify(state))}catch{}
+      SRV='on';
+    }catch(e){SRV='err';console.warn('Cloud save failed',e)}finally{syncBusy=false;}
+  },1200);
+};
+async function initNeonCloud(){
+  const initData=telegramInitData(); if(!initData){SRV='off';return;}
+  try{
+    const res=await fetch('/api/sync?initData='+encodeURIComponent(initData));
+    if(!res.ok)throw new Error('authorization or storage failed');
+    const data=await res.json();
+    if(data.save){
+      const serverTs=Number(data.updatedAt)||0;
+      if(serverTs>(Number(S.ts)||0)){
+        const saved=data.save;
+        S.nick=saved.nick||S.nick;
+        S.inv=(saved.inv||[]).map(x=>({num:x.num,r:x.r,v:(RAR[x.r]||RAR[0]).v,cls:x.cls||'civil'}));
+        S.hist=(saved.hist||[]); S.spins=Number(saved.spins)||0; S.xp=Number(saved.xp)||0; S.lvl=Number(saved.lvl)||1; S.ts=serverTs;
+        try{localStorage.setItem('namerok',JSON.stringify(S))}catch{}
+        if(typeof ui==='function')ui();
+        if(typeof toast==='function')toast('Коллекция загружена из облака');
+      }
+    }
+    cloudReady=true; SRV='on';
+    window.namerokCloudSave(S);
+  }catch(e){SRV='err';console.warn('Cloud load failed',e)}
+}
+
 function cloud(){clearTimeout(pushT);pushT=setTimeout(async()=>{if(!DBH||!UID)return;try{await DBH.collection('data/users/'+UID).doc('save').set({s:JSON.stringify(S),ts:S.ts||0});await DBH.collection('players').doc(UID).set({n:nick(),cap:Math.round(S.bal+invVal()),lvl:S.lvl,sp:S.spins||0,bal:Math.round(S.bal),cnt:S.cnt||[0,0,0,0,0],cl:S.clan?S.clan.n:'',cd:S.clan?(S.clan.d||0):0,ch:Math.round(rate()),hu:HU(),best:S.inv.reduce((a,b)=>Math.max(a,b.r),-1),ts:T()});SRV='on'}catch(e){SRV='err'}},2500)}
 function banner(){const a=$('ann');a.style.display=CFG.msg?'block':'none';a.textContent='📢 '+(CFG.msg||'')}
 function gift(){if(CFG.gift&&CFG.gift.amt&&CFG.gift.id!==S.gid){S.gid=CFG.gift.id;S.bal+=CFG.gift.amt;ui();toast('Подарок от сервера: '+fmt(CFG.gift.amt))}}
@@ -418,7 +456,12 @@ async function srvInit(){
  DBH.collection('players').orderBy('cap','desc').limit(500).onSnapshot(q=>{TOP=q.docs.map(d=>Object.assign({id:d.id},d.data()))},()=>{});
  DBH.collection('market').onSnapshot(q=>{LOTS=q.docs.map(d=>Object.assign({id:d.id},d.data()))},()=>{});DBH.doc('feed/latest').onSnapshot(s=>{if(!s.exists)return;const d=s.data();if(d.id===LASTF||d.id===FSEEN||T()-d.id>15000)return;FSEEN=d.id;topBanner('🏆 '+d.n+' выбил '+RAR[d.r].n.toUpperCase()+' номер '+d.num+'!',RAR[d.r].c)},()=>{});
  cloud()}
-A.top=()=>pg('Топ игроков','По капиталу · живой рейтинг',`<input class="inp" id="nk" maxlength="14" value="${esc(S.nick||'')}" placeholder="Твой ник">`+op('nk','','Сохранить ник')+(TOP.length?TOP.slice(0,20).map((p,i)=>`<div class="inv"><span>${i+1}</span><span class="mp">${esc(p.n)}${p.id===UID?' (ты)':''}</span><span>${fmt(p.cap)}</span></div>`).join(''):'<div class="inv">Рейтинг пуст или нет связи с сервером</div>'));
+A.top=async()=>{
+ let rows=[];
+ try{const initData=telegramInitData();if(!initData)throw new Error('Открой через Telegram');const r=await fetch('/api/sync?action=top&initData='+encodeURIComponent(initData));if(!r.ok)throw new Error('Нет связи');rows=(await r.json()).top||[];}
+ catch(e){return pg('Топ игроков','Открой Mini App через Telegram для загрузки общего рейтинга', '<div class="inv">'+esc(e.message||'Пока нет связи с сервером')+'</div>');}
+ pg('Топ игроков','Общий рейтинг по коллекции и числу бесплатных прокруток',rows.length?rows.map((p,i)=>`<div class="inv"><span>${i+1}</span><span class="mp">${esc(p.name||'Игрок')}</span><span>${Number(p.points||0).toLocaleString('ru-RU')} очк.</span></div>`).join(''):'<div class="inv">Пока нет игроков в рейтинге</div>');
+};
 A.nk=()=>{S.nick=$('nk').value.trim().slice(0,14);save();toast('Ник сохранён');setTimeout(A.top,700)};
 A.srv=()=>{const st={on:'🟢 Сервер онлайн',off:'🔴 Нет связи: нужен вход и права записи',err:'🟠 Ошибка записи на сервер'}[SRV];pg('Сервер',st,`<div class="inv"><span class="mp">Игроков в рейтинге</span><span>${TOP.length}</span></div><div class="inv"><span class="mp">Круток в топе</span><span>${TOP.reduce((a,p)=>a+(p.sp||0),0)}</span></div><div class="inv"><span class="mp">Лотов на рынке</span><span>${LOTS.filter(l=>!l.sold).length}</span></div>`+op('sync','','☁️ Синхронизировать сейчас','прогресс сохраняется сам')+(CAN?op('sadm','','🛠️ Серверная админка','для всех игроков'):''))};
 A.sync=()=>{if(!DBH)return toast('Нет связи с сервером');cloud();toast('Отправлено на сервер')};
@@ -502,6 +545,7 @@ $('luckT').onclick=()=>A.shop();
 srvInit().finally(()=>{if(!S.seen)welcome()});$('bReg').onclick=()=>{if(S.country!=='RU'){toast('Регион выбирается только для России');return}sRegion()};
 $('bType').onclick=sType;$('bCountry').onclick=sType;$('bBet').onclick=sBet;$('bInv').onclick=sInv;$('bDaily').onclick=daily;
 ui();
+initNeonCloud();
 </script>
 </body>
 </html>
