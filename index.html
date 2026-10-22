@@ -442,8 +442,39 @@ async function initNeonCloud(){
   }catch(e){SRV='err';console.warn('Cloud load failed',e)}
 }
 
-function cloud(){clearTimeout(pushT);pushT=setTimeout(async()=>{if(!DBH||!UID)return;try{await DBH.collection('data/users/'+UID).doc('save').set({s:JSON.stringify(S),ts:S.ts||0});await DBH.collection('players').doc(UID).set({n:nick(),cap:Math.round(S.bal+invVal()),lvl:S.lvl,sp:S.spins||0,bal:Math.round(S.bal),cnt:S.cnt||[0,0,0,0,0],cl:S.clan?S.clan.n:'',cd:S.clan?(S.clan.d||0):0,ch:Math.round(rate()),hu:HU(),best:S.inv.reduce((a,b)=>Math.max(a,b.r),-1),ts:T()});SRV='on'}catch(e){SRV='err'}},2500)}
-function banner(){const a=$('ann');a.style.display=CFG.msg?'block':'none';a.textContent='📢 '+(CFG.msg||'')}
+function cloud() {
+clearTimeout(pushT);
+pushT = setTimeout(async () => {
+try {
+const initData = telegramInitData();
+if (!initData) {
+SRV = 'off';
+return;
+}
+
+const response = await fetch('/api/sync', {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify({
+initData,
+save: S
+})
+});
+
+if (!response.ok) {
+SRV = 'err';
+console.error('Neon sync failed:', response.status);
+return;
+}
+
+const result = await response.json();
+SRV = result.ok ? 'on' : 'err';
+} catch (e) {
+SRV = 'err';
+console.error('Neon sync error:', e);
+}
+}, 2500);
+}
 function gift(){if(CFG.gift&&CFG.gift.amt&&CFG.gift.id!==S.gid){S.gid=CFG.gift.id;S.bal+=CFG.gift.amt;ui();toast('Подарок от сервера: '+fmt(CFG.gift.amt))}}
 async function srvInit(){
  if(!window.claude)return;
