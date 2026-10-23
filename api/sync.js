@@ -53,7 +53,7 @@ async function persist(id, user, S, ver, isNew) {
 async function runAct(id, user, name, p) {
   const cfg = await getCfg();
   if (cfg.off && !isAdmin(id) && name !== 'prefs') throw new UErr('Технические работы на сервере');
-  let claimed = null, lot = null, out = {};
+  let claimed = null, lot = null, duelNew = null, out = {};
   for (let t = 0; t < 4; t++) {
     const [row] = await sql`select save, updated_at from players where tg_id = ${id}`;
     const S = norm(row ? row.save : defaultState(user.first_name)), ver = row ? num(row.updated_at) : 0;
@@ -93,12 +93,38 @@ async function runAct(id, user, name, p) {
     } else if (name === 'm_cancel') {
       if (!claimed) { const g = await sql`delete from market where id = ${num(p.id)} and seller = ${id} and sold = false returning plate`; need(g.length, 'Лот уже продан'); claimed = g[0]; }
       S.inv.unshift(claimed.plate); out = { msg: 'Лот снят' };
+    } else if (name === 'd_create') {
+      const st = num(p.stake);
+      need([1e4, 1e5, 1e6, 1e7].includes(st), 'Неверная ставка'); need(S.bal >= st, 'Не хватает денег');
+      const [n] = await sql`select count(*)::int as n from duels where creator = ${id} and status = 'open'`;
+      need(n.n < 3, 'Лимит: 3 открытых вызова');
+      S.bal -= st; duelNew = st; out = { msg: 'Вызов создан, ставка заморожена' };
+    } else if (name === 'd_join') {
+      if (!claimed) {
+        const [d] = await sql`select stake from duels where id = ${num(p.id)} and status = 'open' and creator <> ${id}`;
+        need(d, 'Вызов уже принят'); need(S.bal >= num(d.stake), 'Не хватает денег');
+        const jw = Math.random() < 0.5, nm = String(S.nick || user.first_name || 'Игрок').slice(0, 14);
+        const g = await sql`update duels set status = 'done', opponent = ${id}, opp_name = ${nm}, winner = case when ${jw}::boolean then ${id}::bigint else creator end where id = ${num(p.id)} and status = 'open' and creator <> ${id} returning stake, winner`;
+        need(g.length, 'Вызов уже принят'); claimed = g[0];
+      }
+      const stake = num(claimed.stake), won = String(claimed.winner) === String(id);
+      S.bal -= stake; if (won) S.bal += Math.floor(stake * 1.9);
+      out = { msg: won ? 'Победа! +' + Math.floor(stake * 0.9) + ' ₽' : 'Поражение: −' + stake + ' ₽' };
+    } else if (name === 'd_cancel') {
+      if (!claimed) { const g = await sql`delete from duels where id = ${num(p.id)} and creator = ${id} and status = 'open' returning stake`; need(g.length, 'Вызов уже принят'); claimed = g[0]; }
+      S.bal += num(claimed.stake); out = { msg: 'Вызов отменён, ставка возвращена' };
+    } else if (name === 'd_claim') {
+      if (!claimed) { const g = await sql`delete from duels where id = ${num(p.id)} and creator = ${id} and status = 'done' returning stake, winner`; need(g.length, 'Уже получено'); claimed = g[0]; }
+      const won = String(claimed.winner) === String(id);
+      if (won) S.bal += Math.floor(num(claimed.stake) * 1.9);
+      out = { msg: won ? 'Победа! +' + Math.floor(num(claimed.stake) * 0.9) + ' ₽' : 'Поражение: −' + num(claimed.stake) + ' ₽' };
     } else {
       need(ACT[name], 'Неизвестное действие');
       out = (await ACT[name](S, p || {}, c)) || {};
     }
     const saved = await persist(id, user, S, ver, !row);
     if (!saved) continue;
+    if (duelNew) await sql`insert into duels (creator, creator_name, stake, created_at) values (${id}, ${String(S.nick || user.first_name || 'Игрок').slice(0, 14)}, ${duelNew}, ${Date.now()})`;
     if (lot) await sql`insert into market (seller, seller_name, plate, r, price, created_at) values (${id}, ${String(S.nick || user.first_name || 'Игрок').slice(0, 14)}, ${JSON.stringify(lot.plate)}::jsonb, ${lot.plate.r}, ${lot.price}, ${Date.now()})`;
     return { ok: true, s: S, updatedAt: saved, msg: out.msg, r: out.r };
   }
@@ -136,6 +162,7 @@ async function adminOp(id, p) {
       const w = num(p.tg);
       need(w, 'Введи Telegram ID игрока');
       await sql`delete from market where seller = ${w}`;
+      await sql`delete from duels where creator = ${w}`;
       await sql`delete from players where tg_id = ${w}`;
       msg = 'Игрок ' + w + ' обнулён';
       break;
@@ -143,6 +170,7 @@ async function adminOp(id, p) {
     case 'wipeall':
       need(p.confirm === 'WIPE', 'Нужно подтверждение');
       await sql`delete from market`;
+      await sql`delete from duels`;
       await sql`delete from players`;
       await sql`update supply set taken = 0`;
       await sql`update feed set ev = null`;
@@ -180,6 +208,11 @@ export default async function handler(req, res) {
         const cfg = await getCfg();
         return res.json({ feed: r ? r.ev : null, cfg: pub(cfg) });
       }
+      if (action === 'duels') {
+        const open = await sql`select id, creator_name, stake from duels where status = 'open' and creator <> ${id} order by created_at desc limit 30`;
+        const mine = await sql`select id, stake, status, winner, opp_name from duels where creator = ${id} order by created_at desc limit 20`;
+        return res.json({ open: open.map((d) => ({ id: String(d.id), n: d.creator_name, stake: num(d.stake) })), mine: mine.map((d) => ({ id: String(d.id), stake: num(d.stake), status: d.status, win: String(d.winner) === String(id), opp: d.opp_name })) });
+      }
       if (action === 'market') {
         const rows = await sql`select id, seller, seller_name, plate, r, price, sold from market where sold = false or seller = ${id} order by created_at desc limit 100`;
         return res.json({ lots: rows.map((l) => ({ id: String(l.id), n: l.seller_name, num: l.plate.num, r: l.r, v: num(l.plate.v), cls: l.plate.cls, pr: num(l.price), sold: l.sold, mine: String(l.seller) === String(id) })) });
@@ -194,6 +227,7 @@ export default async function handler(req, res) {
     }
     if (action === 'reset') {
       await sql`delete from market where seller = ${id} and sold = false`;
+      await sql`delete from duels where creator = ${id} and status = 'open'`;
       await sql`delete from players where tg_id = ${id}`;
       return res.json({ ok: true });
     }
