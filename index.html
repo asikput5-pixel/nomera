@@ -237,7 +237,7 @@ function ui(){
 function toast(t){const e=$('toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),2200)}
 
 let busy=false;
-function spin(){
+function spin(){if(initData)return spinSrv();
  if(CFG.off&&!CAN){toast('Технические работы на сервере');return}if(busy||S.bal<cost())return;busy=true;
  $('act').style.display='none';const c=cost();if(c===0)S.free--;S.bal-=c;S.spins=(S.spins||0)+1;qa(0);ui();
  const pl=$('plate');pl.classList.add('spin');
@@ -285,10 +285,10 @@ function sInv(){
  ${S.inv.slice(0,40).map((x,i)=>`<div class="inv"><span class="mp" style="color:${RAR[x.r].c}">${x.num}</span><span>${RAR[x.r].n}</span><button class="sell" data-s="${i}">Продать ${fmt(x.v)}</button></div>`).join('')}
  ${S.inv.length?'<button class="opt" id="sa" style="justify-content:center;color:var(--green)">Продать все обычные</button>':''}
  <button class="cl">Закрыть</button>`);
- $('sh').querySelectorAll('[data-s]').forEach(b=>b.onclick=()=>{const it=S.inv[+b.dataset.s];if(!it)return;const go=()=>{const k=S.inv.indexOf(it);if(k<0)return;const x=S.inv.splice(k,1)[0];S.bal+=x.v;qa(2);ui();sInv()};if(it.r>=3)ask(RAR[it.r].n+' номер '+it.num+' — продать за '+fmt(it.v)+'?',go);else go()});
- const sa=$('sa');if(sa)sa.onclick=()=>{let g=0;S.inv=S.inv.filter(x=>{if(x.r===0){g+=x.v;return false}return true});S.bal+=g;toast('Продано на '+fmt(g));ui();sInv()};
+ $('sh').querySelectorAll('[data-s]').forEach(b=>b.onclick=()=>{const it=S.inv[+b.dataset.s];if(!it)return;const go=async()=>{const k=S.inv.indexOf(it);if(k<0)return;if(initData){if(await act('sell',{i:k,num:it.num}))sInv();return}const x=S.inv.splice(k,1)[0];S.bal+=x.v;qa(2);ui();sInv()};if(it.r>=3)ask(RAR[it.r].n+' номер '+it.num+' — продать за '+fmt(it.v)+'?',go);else go()});
+ const sa=$('sa');if(sa)sa.onclick=()=>{if(initData){act('sellc',{}).then(()=>sInv());return}let g=0;S.inv=S.inv.filter(x=>{if(x.r===0){g+=x.v;return false}return true});S.bal+=g;toast('Продано на '+fmt(g));ui();sInv()};
  $('sh').querySelector('.cl').onclick=close}
-const T=()=>Date.now(),day=()=>new Date().toDateString();
+const T=()=>Date.now(),day=()=>new Date().toISOString().slice(0,10);
 function qd(){if(!S.q||S.q.d!==day())S.q={d:day(),c:[0,0,0],k:[0,0,0]}}
 function qa(i){qd();S.q.c[i]++}
 function addXp(n){S.xp+=n;while(S.xp>=100){S.xp-=100;S.lvl++;S.bal+=1000*S.lvl}}
@@ -348,17 +348,12 @@ A.inv2=()=>pg('Позвать друзей','Другу 100 круток и 300 
 A.cp=()=>{const u=location.href;try{navigator.clipboard.writeText(u).then(()=>toast('Ссылка скопирована'),()=>toast(u))}catch(e){toast(u)}};
 A.set=()=>pg('Настройки','',op('ta','','Анимация прокрутки',S.na?'выключена':'включена')+op('rs','','Сбросить прогресс','нельзя отменить','','on'));
 A.ta=()=>{S.na=!S.na;save();A.set()};
-A.rs=()=>{if(!confirm('Сбросить весь прогресс?'))return;try{localStorage.removeItem('namerok')}catch(e){}location.reload()};
-let IS_ADMIN=false;
+A.rs=()=>ask('Сбросить весь прогресс? Данные на сервере тоже удалятся.',async()=>{try{if(initData)await api('reset',{})}catch(e){toast('Не удалось сбросить на сервере');return}try{localStorage.removeItem('namerok')}catch(e){}location.reload()},'Сбросить');
+let AUTH=false;
 const av=()=>Math.max(0,parseInt($('av').value)||0);
-A.adm=async()=>{
-  if(!IS_ADMIN){
-    try { IS_ADMIN=!!(await api('admin_check')).admin; }
-    catch(e){ toast('Админка доступна только владельцу. Открой игру через Telegram.'); return; }
-  }
-  if(!IS_ADMIN){toast('Нет доступа к админке');return}
-  pg('Админ-панель','Доступ подтверждён сервером · инвентарь: '+S.inv.length+' · множитель удачи ×'+(S.lm||1),'<input class="inp" id="av" inputmode="numeric" placeholder="Число для сумм, уровня, круток">'+op('a1','','Добавить к балансу')+op('a2','','Установить баланс')+op('a3','','Установить уровень')+op('a4','','Выдать бесплатные крутки')+op('a5','','Удача ×2 на 1 час')+op('a6','','Множитель удачи','из поля выше')+'<p style="margin-top:8px">Следующая крутка гарантированно:</p><div class="grid" style="grid-template-columns:repeat(3,1fr)">'+RAR.map((r,i)=>`<button data-a="af" data-v="${i}" style="color:${r.c}">${r.n}</button>`).join('')+'<button data-a="af" data-v="-1" style="color:var(--tx)">Случайная</button></div><p>Выдать номер в инвентарь:</p><div class="grid" style="grid-template-columns:repeat(3,1fr)">'+RAR.map((r,i)=>`<button data-a="gv" data-v="${i}" style="color:${r.c}">${r.n}</button>`).join('')+'</div>'+op('a7','','Очистить инвентарь')+op('a8','','Сбросить лимиты','бонус, рулетка, мойка, задания')+'<textarea class="inp" id="sv" placeholder="Сохранение JSON"></textarea>'+op('a9','','Экспорт сохранения')+op('a10','','Импорт сохранения')+op('a12','','Выйти из админки'));
-};
+A.adm=()=>{if(!AUTH){pg('Админ-панель','Введи PIN (по умолчанию 1234)','<input class="inp" id="pin" type="password" inputmode="numeric" placeholder="PIN">'+op('al','','Войти'));return}
+pg('Админ-панель','Инвентарь: '+S.inv.length+' · множитель удачи ×'+(S.lm||1),'<input class="inp" id="av" inputmode="numeric" placeholder="Число для сумм, уровня, круток, PIN">'+op('a1','','Добавить к балансу')+op('a2','','Установить баланс')+op('a3','','Установить уровень')+op('a4','','Выдать бесплатные крутки')+op('a5','','Удача ×2 на 1 час')+op('a6','','Множитель удачи','из поля выше')+'<p style="margin-top:8px">Следующая крутка гарантированно:</p><div class="grid" style="grid-template-columns:repeat(3,1fr)">'+RAR.map((r,i)=>`<button data-a="af" data-v="${i}" style="color:${r.c}">${r.n}</button>`).join('')+'<button data-a="af" data-v="-1" style="color:var(--tx)">Случайная</button></div><p>Выдать номер в инвентарь:</p><div class="grid" style="grid-template-columns:repeat(3,1fr)">'+RAR.map((r,i)=>`<button data-a="gv" data-v="${i}" style="color:${r.c}">${r.n}</button>`).join('')+'</div>'+op('a7','','Очистить инвентарь')+op('a8','','Сбросить лимиты','бонус, рулетка, мойка, задания')+'<textarea class="inp" id="sv" placeholder="Сохранение JSON"></textarea>'+op('a9','','Экспорт сохранения')+op('a10','','Импорт сохранения')+op('a11','','Сменить PIN','из поля выше, от 4 цифр')+op('a12','','Выйти из админки'))};
+A.al=()=>{if($('pin').value===(S.pin||'1234')){AUTH=true;A.adm()}else toast('Неверный PIN')};
 A.a1=()=>{S.bal+=av();ui();toast('Баланс '+fmt(S.bal))};
 A.a2=()=>{S.bal=av();ui();toast('Баланс '+fmt(S.bal))};
 A.a3=()=>{S.lvl=Math.max(1,av());ui();toast('Уровень '+S.lvl)};
@@ -372,28 +367,60 @@ A.a8=()=>{S.daily=0;S.roul=0;S.wash=0;S.ev=0;S.q=null;save();toast('Лимиты
 A.a9=()=>{$('sv').value=JSON.stringify(S)};
 A.a10=()=>{try{S=Object.assign(S,JSON.parse($('sv').value));ui();toast('Сохранение загружено')}catch(e){toast('Неверный JSON')}};
 A.a11=()=>{const v=$('av').value.trim();if(v.length<4)return toast('PIN от 4 цифр');S.pin=v;save();toast('PIN изменён')};
-A.a12=()=>{IS_ADMIN=false;close()};
+A.a12=()=>{AUTH=false;close()};
 var DBH=null,UID=null,CAN=false,CFG={},TOP=[],LOTS=[],SRV='off',pushT;
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
 const nick=()=>S.nick||('Игрок '+String(UID||'').slice(0,4));
 let initData='';
 async function api(a,body){const r=await fetch('/api/sync?action='+a,{method:body?'POST':'GET',headers:{'Content-Type':'application/json','X-Init-Data':initData},body:body?JSON.stringify(body):undefined});if(!r.ok){let m=String(r.status);try{m=(await r.json()).error||m}catch(e){}throw new Error(m)}return r.json()}
 async function loadTop(){try{TOP=(await api('top')).top||[]}catch(e){}}
-function cloud(){clearTimeout(pushT);pushT=setTimeout(async()=>{if(!initData)return;try{await api('save',{save:S});SRV='on'}catch(e){SRV='err'}},2500)}
+function cloud(){}
+async function act(name,p,quiet){try{const d=await api('act',{name,p});if(!d.ok){toast(d.err||'Ошибка');return null}if(d.s){S=Object.assign(S,d.s);S.sver=d.updatedAt}if(!quiet){ui();if(d.msg)toast(d.msg)}return d}catch(e){toast('Нет связи с сервером');return null}}
+async function srvLoad(){try{const d=await api('load');S=Object.assign(S,d.s);S.sver=d.updatedAt;CFG=d.cfg||{};banner();if(d.admin){CAN=true;if(!MENU.some(m=>m[2]==='adm'))MENU.push(['Админ-панель','🛠️','adm'])}SRV='on';ui();return true}catch(e){SRV='err';setTimeout(srvLoad,5000);return false}}
 function banner(){const a=$('ann');a.style.display=CFG.msg?'block':'none';a.textContent='📢 '+(CFG.msg||'')}
 function gift(){if(CFG.gift&&CFG.gift.amt&&CFG.gift.id!==S.gid){S.gid=CFG.gift.id;S.bal+=CFG.gift.amt;ui();toast('Подарок от сервера: '+fmt(CFG.gift.amt))}}
 async function srvInit(){
  const tg=window.Telegram&&window.Telegram.WebApp;initData=(tg&&tg.initData)||'';
  const u=tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user;
- if(u){UID=String(u.id);if(!S.nick)S.nick=[u.first_name,u.last_name].filter(Boolean).join(' ').slice(0,14)}
+ if(u)UID=String(u.id);
  if(!initData){SRV='off';return}
- try{IS_ADMIN=!!(await api('admin_check')).admin}catch(e){IS_ADMIN=false}
- try{const d=await api('load');if(d.save&&d.updatedAt>(S.ts||0)){S=Object.assign(S,d.save);ui();toast('Прогресс загружен с сервера')}SRV='on'}catch(e){SRV='err'}
+ installSrv();
+ await srvLoad();
  loadTop();setInterval(loadTop,30000);
- setInterval(async()=>{try{const f=(await api('feed')).feed;if(f&&f.id!==LASTF&&f.id!==FSEEN&&T()-f.id<15000){FSEEN=f.id;topBanner('🏆 '+f.n+' выбил '+RAR[f.r].n.toUpperCase()+' номер '+f.num+'!',RAR[f.r].c)}}catch(e){}},5000);
- cloud()}
+ setInterval(async()=>{try{const d=await api('feed'),f=d.feed;CFG=d.cfg||{};banner();if(f&&f.id!==LASTF&&f.id!==FSEEN&&T()-f.id<15000){FSEEN=f.id;topBanner('🏆 '+f.n+' выбил '+RAR[f.r].n.toUpperCase()+' номер '+f.num+(f.left!=null?' · осталось в регионе: '+f.left:'')+'!',RAR[f.r].c)}}catch(e){}},5000)}
+async function spinSrv(){
+ if(busy)return;busy=true;$('act').style.display='none';
+ const pl=$('plate');pl.classList.add('spin');const lv=S.lvl;let k=0;
+ const iv=setInterval(()=>{$('num').textContent=genPlate(0).num;k++},80);
+ const d=await act('spin',{type:S.type,country:S.country,region:S.region,bet:S.bet},true);
+ const w=(S.na?80:960)-k*80;if(w>0)await new Promise(r=>setTimeout(r,w));
+ clearInterval(iv);pl.classList.remove('spin');
+ if(!d){busy=false;ui();return}
+ const x=d.r,rar=x.rar;paint(x.p,rar);
+ pl.classList.remove('pop');void pl.offsetWidth;pl.classList.add('pop');
+ if(rar>=3)boom(RAR[rar].c);
+ if(rar>=5){pl.classList.add('fx'+rar);cine(rar,x.item.num);LASTF=x.fid;topBanner('🏆 '+nick()+' выбил '+RAR[rar].n.toUpperCase()+' номер '+x.item.num+'!',RAR[rar].c)}
+ $('rn').textContent=RAR[rar].n;$('rn').style.color=RAR[rar].c;
+ $('rd').textContent=(x.sold?'Автопродажа: +':'Оценка: ')+fmt(x.val);
+ if(S.lvl>lv)toast('Уровень '+S.lvl+'! Бонус '+fmt(1000*S.lvl));
+ if(x.taken){$('rd').textContent='В регионе '+x.taken.n+' тираж '+RAR[x.taken.r].n.toLowerCase()+'х номеров исчерпан — выпал мифик';toast('Тираж в регионе исчерпан')}
+ LASTI=x.sold?null:S.inv[0];showAct();busy=false;ui()}
+function installSrv(){
+ const M={buy:['buy','shop',v=>({k:v})],bpc:['bpc','bp'],evc:['evc','event'],gc:['gc','goal'],rr:['roul','roul'],qc:['qc','quests',v=>({i:+v})],ac:['ac','ach',v=>({i:+v})],cc:['cc','coll'],dd:['dd','duel',v=>({b:+v})],ab:['ab','auc'],up:['up','upg',v=>({i:+v,num:S.inv[+v].num})],sw:['sw','swap',v=>({r:+v})],ub:['ub','uniq',()=>({un:$('un').value})],wb:['wash','wash'],cb:['cont','cars',v=>({i:+v})],ccol:['ccol','cars'],cat:['plate_on','cars',v=>{const[c,i]=String(v).split('|').map(Number);return{c,i,num:S.inv[i].num}}],cdt:['plate_off','cars',v=>({c:+v})],cd:['clan_donate','clan'],cl2:['clan_leave','clan'],cc2:['clan_join','clan',()=>({n:$('cn').value})],pin:['pin','show',v=>({i:+v,num:S.inv[+v].num})],unp:['unp','show',v=>({i:+v})],asl:['prefs','set',()=>({as:(S.as==null?-1:S.as)>=2?-1:(S.as==null?-1:S.as)+1})]};
+ for(const k in M){const [n,pgn,b]=M[k];A[k]=async v=>{const d=await act(n,b?b(v):{});if(d)A[pgn]()}}
+ A.dailyP=()=>act('daily',{});
+ A.csell=c=>{const car=S.cars[c];if(!car)return;const go=async()=>{if(await act('car_sell',{c}))A.cars()};car.r>=3?ask(RAR[car.r].n+' машина '+car.n+' — продать за '+fmt(car.inc*4)+'?',go):go()};
+ A.auc=async()=>{if(!S.au&&!await act('auc_new',{},true))return;pg('Аукцион','Шанс выиграть торги 50%. Проиграл — комиссия 10%',op('ab','',esc(S.au.num),RAR[S.au.r].n,'Ставка '+fmt(S.au.pr)))};
+ A.mo=async i=>{const x=S.inv[i];if(!x)return;const go=async()=>{const pr=Math.max(1,parseInt($('pr').value)||x.v);if(await act('m_list',{i,num:x.num,price:pr}))A.market()};x.r>=3?ask('Выставить '+RAR[x.r].n+' номер '+x.num+' на рынок?',go,'Выставить'):go()};
+ A.mb2=async id=>{if(await act('m_buy',{id}))A.market()};A.mc=async id=>{if(await act('m_claim',{id}))A.market()};A.mx=async id=>{if(await act('m_cancel',{id}))A.market()};
+ const AD=(op,x)=>async()=>{const d=await act('adm',Object.assign({op,tg:$('at').value.trim(),n:parseInt($('av').value)||0,msg:$('am').value,reg:$('ar').value.trim()},x||{}));if(d)A.adm()};
+ A.ad1=AD('money');A.ad2=AD('level');A.ad3=AD('free');A.ad4=AD('msg');A.ad5=AD('maint');A.ad6=AD('lm');A.ad7=AD('capS');A.ad8=AD('capA');A.adp=r=>AD('plate',{r:+r})();
+ A.adm=async()=>{let rows=[];try{rows=(await api('act',{name:'adm',p:{op:'supply'}})).rows||[]}catch(e){}const m={};rows.forEach(r=>{(m[r.region]=m[r.region]||{})[r.kind]=r.taken+'/'+r.cap});
+  pg('Админ-панель','Доступ только у владельца','<input class="inp" id="at" inputmode="numeric" placeholder="Telegram ID игрока (пусто = ты)"><input class="inp" id="av" inputmode="numeric" placeholder="Число"><input class="inp" id="am" maxlength="120" placeholder="Текст объявления"><input class="inp" id="ar" maxlength="6" placeholder="Регион (для тиража; пусто = все)">'+op('ad1','','Выдать деньги')+op('ad2','','Установить уровень')+op('ad3','','Выдать бесплатные крутки')+'<p>Выдать номер (регион из поля):</p><div class="grid" style="grid-template-columns:repeat(3,1fr)">'+RAR.map((r,i)=>`<button data-a="adp" data-v="${i}" style="color:${r.c}">${r.n}</button>`).join('')+'</div>'+op('ad4','','Опубликовать объявление')+op('ad5','','Технические работы',CFG.off?'включены':'выключены')+op('ad6','','Глобальная удача','множитель из поля Число')+op('ad7','','Секретки: тираж на регион','число из поля')+op('ad8','','Абсолюты: тираж на регион','число из поля')+'<p style="margin-top:10px">Тираж по регионам (выпущено/всего)</p>'+(Object.keys(m).sort().map(g=>`<div class="inv"><span class="mp">${esc(g)}</span><span>секр ${m[g].secret||'—'} · абс ${m[g].absolute||'—'}</span></div>`).join('')||'<div class="inv">Пока ничего не выпало</div>'))};
+}
+
 A.top=()=>pg('Топ игроков','По капиталу · живой рейтинг',`<input class="inp" id="nk" maxlength="14" value="${esc(S.nick||'')}" placeholder="Твой ник">`+op('nk','','Сохранить ник')+(TOP.length?TOP.slice(0,20).map((p,i)=>`<div class="inv"><span>${i+1}</span><span class="mp">${esc(p.n)}${p.id===UID?' (ты)':''}</span><span>${fmt(p.cap)}</span></div>`).join(''):'<div class="inv">Рейтинг пуст или нет связи с сервером</div>'));
-A.nk=()=>{S.nick=$('nk').value.trim().slice(0,14);save();toast('Ник сохранён');setTimeout(A.top,700)};
+A.nk=()=>{S.nick=$('nk').value.trim().slice(0,14);save();if(initData)act('prefs',{nick:S.nick});toast('Ник сохранён');setTimeout(A.top,700)};
 A.srv=()=>{const st={on:'🟢 Сервер онлайн',off:'🔴 Нет связи: открой игру через Telegram',err:'🟠 Ошибка записи на сервер'}[SRV];pg('Сервер',st,`<div class="inv"><span class="mp">Игроков в рейтинге</span><span>${TOP.length}</span></div><div class="inv"><span class="mp">Круток в топе</span><span>${TOP.reduce((a,p)=>a+(p.sp||0),0)}</span></div><div class="inv"><span class="mp">Лотов на рынке</span><span>${LOTS.filter(l=>!l.sold).length}</span></div>`+op('sync','','☁️ Синхронизировать сейчас','прогресс сохраняется сам')+(CAN?op('sadm','','🛠️ Серверная админка','для всех игроков'):''))};
 A.sync=()=>{if(!DBH)return toast('Нет связи с сервером');cloud();toast('Отправлено на сервер')};
 const cfgSet=o=>DBH?DBH.doc('server/config').set(Object.assign({},CFG,o)).then(()=>{toast('Применено для всех');setTimeout(A.sadm,500)},()=>toast('Нет прав записи')):toast('Нет связи с сервером');
@@ -408,10 +435,10 @@ let MKT=[];
 A.market=async()=>{if(!initData)return mkLocal();try{MKT=(await api('market')).lots||[]}catch(e){}const mine=MKT.filter(l=>l.mine),open=MKT.filter(l=>!l.mine);pg('Рынок','Лоты живых игроков · комиссия 5%',mine.map(l=>l.sold?op('mc',l.id,esc(l.num)+' — продан','забрать деньги',fmt(l.pr*.95),'on'):op('mx',l.id,esc(l.num)+' — твой лот','снять с продажи',fmt(l.pr))).join('')+(open.map(l=>op('mb2',l.id,esc(l.num),RAR[l.r].n+' · '+esc(l.n),fmt(l.pr))).join('')||'<div class="inv">Чужих лотов пока нет</div>')+op('ms','','➕ Выставить номер','из инвентаря')+op('mloc','','🤖 Лоты бота','локальный рынок'))};
 A.mloc=()=>mkLocal();
 A.ms=()=>pg('Выставить номер','Цена по умолчанию — оценка',`<input class="inp" id="pr" inputmode="numeric" placeholder="Цена, ₽">`+S.inv.slice(0,12).map((x,i)=>op('mo',i,esc(x.num),RAR[x.r].n,fmt(x.v))).join(''));
-A.mo=async i=>{const x=S.inv[i];if(!x)return;if(x.r>=3&&!MOK){ask('Выставить '+RAR[x.r].n+' номер '+x.num+' на рынок?',()=>{MOK=1;A.mo(i);MOK=0},'Выставить');return}const pr=Math.max(1,parseInt($('pr').value)||x.v);try{const d=await api('list',{plate:{num:x.num,r:x.r,v:x.v,cls:x.cls},price:pr});if(!d.ok)throw 0;S.inv.splice(i,1);ui();toast('Выставлено на рынок');A.market()}catch(e){const m=e&&e.message;toast(m==='limit'?'Лимит: 20 лотов':m==='unauthorized'?'Открой игру через Telegram':m==='bad lot'?'Неверная цена':'Ошибка сервера: '+m)}};
-A.mb2=async id=>{const l=MKT.find(x=>x.id===id);if(!l)return;if(S.bal<l.pr)return toast('Не хватает денег');try{const d=await api('buy',{id});if(!d.ok)return toast('Лот уже куплен');S.bal-=l.pr;S.inv.unshift({num:d.plate.num,r:d.plate.r,v:d.plate.v,cls:d.plate.cls});ui();toast('Куплено');A.market()}catch(e){toast('Ошибка покупки')}};
-A.mc=async id=>{try{const d=await api('claim_sold',{id});if(!d.ok)return;S.bal+=Math.round(d.price*.95);ui();toast('Получено '+fmt(d.price*.95));A.market()}catch(e){toast('Ошибка')}};
-A.mx=async id=>{try{const d=await api('cancel',{id});if(!d.ok)return toast('Лот уже продан');S.inv.unshift(d.plate);ui();A.market()}catch(e){toast('Ошибка')}};
+A.mo=async i=>{const x=S.inv[i];if(!x)return;if(x.r>=3&&!MOK){ask('Выставить '+RAR[x.r].n+' номер '+x.num+' на рынок?',()=>{MOK=1;A.mo(i);MOK=0},'Выставить');return}const pr=Math.max(1,parseInt($('pr').value)||x.v);try{await DBH.collection('market').doc('l'+T()).set({u:UID,n:nick(),num:x.num,r:x.r,v:x.v,cls:x.cls,pr,sold:false});S.inv.splice(i,1);ui();toast('Выставлено на рынок');setTimeout(A.market,600)}catch(e){toast('Не удалось: нужен доступ на запись')}};
+A.mb2=async id=>{const ref=DBH.collection('market').doc(id);try{const a=await ref.acquire({holder:UID,ttlMs:5000});if(!a.acquired)return toast('Лот занят, попробуй ещё раз');const s=await ref.get(),l=s.data();if(!s.exists||l.sold||l.u===UID)return toast('Лот уже недоступен');if(S.bal<l.pr)return toast('Не хватает денег');await ref.update({sold:true,b:UID});if(l.r>=5)uClaim(l.r,l.num);S.bal-=l.pr;S.inv.unshift({num:l.num,r:l.r,v:l.v,cls:l.cls});ui();toast('Куплено');setTimeout(A.market,600)}catch(e){toast('Ошибка покупки')}};
+A.mc=async id=>{const l=LOTS.find(x=>x.id===id);if(!l||!l.sold||l.u!==UID)return;try{await DBH.collection('market').doc(id).delete();S.bal+=Math.round(l.pr*.95);ui();toast('Получено '+fmt(l.pr*.95));setTimeout(A.market,600)}catch(e){toast('Ошибка')}};
+A.mx=async id=>{const l=LOTS.find(x=>x.id===id);if(!l||l.sold)return;try{await DBH.collection('market').doc(id).delete();S.inv.unshift({num:l.num,r:l.r,v:l.v,cls:l.cls});ui();setTimeout(A.market,600)}catch(e){toast('Ошибка')}};
 A.set=()=>{const L=['выключена','обычные','обычные и редкие','до эпиков включительно'],i=S.as==null?-1:S.as;pg('Настройки','',op('asl','','💸 Автопродажа','продаёт выпавшие номера сразу',L[i+1])+op('ta','','Анимация прокрутки',S.na?'выключена':'включена')+op('rs','','Сбросить прогресс','нельзя отменить','','on'))};
 A.asl=()=>{const i=S.as==null?-1:S.as;S.as=i>=2?-1:i+1;save();A.set()};
 function clanTop(){const m={};TOP.forEach(p=>{if(p.cl){const c=m[p.cl]||(m[p.cl]={n:p.cl,t:0,k:0});c.t+=p.cd||0;c.k++}});return Object.values(m).sort((a,b)=>b.t-a.t).slice(0,15)}
@@ -428,7 +455,7 @@ const rate=()=>(S.cars||[]).reduce((a,c)=>a+c.inc*(c.pl?PM[c.pl.r]||1:1),0);
 const pend=()=>(S.cacc||0)+rate()*Math.min(12,(T()-(S.cl||T()))/36e5);
 const settle=()=>{S.cacc=pend();S.cl=T()};
 setInterval(()=>{const e=$('pend');if(e)e.textContent=fmt(pend())},1000);
-A.cars=()=>{S.cars=S.cars||[];pg('Машины','Доход в час: '+fmt(rate())+' · копится до 12 ч',op('ccol','','💰 Забрать доход','накоплено','<b id="pend">'+fmt(pend())+'</b>')+CONT.map((c,i)=>op('cb',i,'📦 '+c[0],'шансы: '+c[2].map((w,k)=>w?RAR[k].n+' '+w+'%':'').filter(Boolean).join(' · '),fmt(c[1]))).join('')+(S.cars.map((c,i)=>`<div class="inv"><span style="font-size:26px">${c.e}</span><span class="mp" style="color:${RAR[c.r].c}">${esc(c.n)}<small style="display:block;color:var(--mut);font-weight:500;font-size:11px">${c.pl?'🔢 '+esc(c.pl.num)+' ×'+PM[c.pl.r]:'без номера'} · ${fmt(c.inc*(c.pl?PM[c.pl.r]||1:1))}/ч</small></span><span style="display:flex;flex-direction:column;gap:4px"><button class="sell" data-a="${c.pl?'cdt':'cpl'}" data-v="${i}">${c.pl?'Снять номер':'Повесить номер'}</button><button class="sell" data-a="csell" data-v="${i}" style="background:#3b1d24;color:#ff7a8f">Продать ${fmt(c.inc*30)}</button></span></div>`).join('')||'<div class="inv">Гараж пуст. Открой контейнер</div>'))};
+A.cars=()=>{S.cars=S.cars||[];pg('Машины','Доход в час: '+fmt(rate())+' · копится до 12 ч',op('ccol','','💰 Забрать доход','накоплено','<b id="pend">'+fmt(pend())+'</b>')+CONT.map((c,i)=>op('cb',i,'📦 '+c[0],'шансы: '+c[2].map((w,k)=>w?RAR[k].n+' '+w+'%':'').filter(Boolean).join(' · '),fmt(c[1]))).join('')+(S.cars.map((c,i)=>`<div class="inv"><span style="font-size:26px">${c.e}</span><span class="mp" style="color:${RAR[c.r].c}">${esc(c.n)}<small style="display:block;color:var(--mut);font-weight:500;font-size:11px">${c.pl?'🔢 '+esc(c.pl.num)+' ×'+PM[c.pl.r]:'без номера'} · ${fmt(c.inc*(c.pl?PM[c.pl.r]||1:1))}/ч</small></span><span style="display:flex;flex-direction:column;gap:4px"><button class="sell" data-a="${c.pl?'cdt':'cpl'}" data-v="${i}">${c.pl?'Снять номер':'Повесить номер'}</button><button class="sell" data-a="csell" data-v="${i}" style="background:#3b1d24;color:#ff7a8f">Продать ${fmt(c.inc*4)}</button></span></div>`).join('')||'<div class="inv">Гараж пуст. Открой контейнер</div>'))};
 A.cb=i=>{const k=CONT[i];if(S.bal<k[1])return toast('Не хватает денег');S.bal-=k[1];const r=Math.random()*100;let t=0,rr=0;for(let j=0;j<4;j++){t+=k[2][j];if(r<t){rr=j;break}}const c=pick(CARS.filter(x=>x[0]===rr));settle();S.cars=S.cars||[];S.cars.unshift({n:c[1],e:c[2],r:rr,inc:c[3],pl:null});if(!S.cl)S.cl=T();ui();if(rr>=2)boom(RAR[rr].c);toast(c[2]+' '+c[1]+' · '+RAR[rr].n);A.cars()};
 A.ccol=()=>{const p=Math.floor(pend());if(p<1)return toast('Пока нечего забирать');S.bal+=p;S.cacc=0;S.cl=T();ui();toast('+'+fmt(p));A.cars()};
 A.cpl=c=>pg('Повесить номер','Доход машины растёт с редкостью номера',S.inv.slice(0,15).map((x,i)=>op('cat',c+'|'+i,esc(x.num),RAR[x.r].n+' · доход ×'+PM[x.r],'')).join('')||'<div class="inv">Нет номеров. Покрути на главном экране</div>');
@@ -443,8 +470,8 @@ async function uniqRoll(r){if(!initData)return r;try{const d=await api('claim',{
 function announce(rar,num){const id=T();LASTF=id;topBanner('🏆 '+nick()+' выбил '+RAR[rar].n.toUpperCase()+' номер '+num+'!',RAR[rar].c);if(initData)api('announce',{r:rar,num,id}).catch(()=>{})}
 function topBanner(t,c){let e=$('ntf');if(!e){e=document.createElement('div');e.id='ntf';document.body.appendChild(e)}e.textContent=t;e.style.borderColor=c;e.style.boxShadow='0 8px 30px '+c+'66';e.classList.remove('on');void e.offsetWidth;e.classList.add('on');clearTimeout(tbT);tbT=setTimeout(()=>e.classList.remove('on'),3000)}
 function showAct(){const a=$('act');if(!LASTI||S.inv.indexOf(LASTI)<0){a.style.display='none';return}a.style.display='flex';$('aSell').textContent='💰 Продать '+fmt(LASTI.v)}
-$('aSell').onclick=()=>{const i0=S.inv.indexOf(LASTI);if(i0<0)return;const it=LASTI,go=()=>{const i=S.inv.indexOf(it);if(i<0)return;const x=S.inv.splice(i,1)[0];S.bal+=x.v;qa(2);LASTI=null;ui();showAct();toast('Продано за '+fmt(x.v))};if(it.r>=3)ask(RAR[it.r].n+' номер '+it.num+' — продать за '+fmt(it.v)+'?',go);else go()};
-$('aGar').onclick=()=>{const i=S.inv.indexOf(LASTI);if(i<0)return;const car=(S.cars||[]).filter(c=>!c.pl).sort((a,b)=>b.inc-a.inc)[0];if(!car){toast('Нет свободной машины. Открой контейнер');A.cars();return}settle();car.pl=S.inv.splice(i,1)[0];LASTI=null;ui();showAct();toast('Номер на '+car.e+' '+car.n+' · '+fmt(car.inc*(PM[car.pl.r]||1))+'/ч')};
+$('aSell').onclick=()=>{const i0=S.inv.indexOf(LASTI);if(i0<0)return;const it=LASTI,go=async()=>{const i=S.inv.indexOf(it);if(i<0)return;if(initData){if(await act('sell',{i,num:it.num})){LASTI=null;showAct()}return}const x=S.inv.splice(i,1)[0];S.bal+=x.v;qa(2);LASTI=null;ui();showAct();toast('Продано за '+fmt(x.v))};if(it.r>=3)ask(RAR[it.r].n+' номер '+it.num+' — продать за '+fmt(it.v)+'?',go);else go()};
+$('aGar').onclick=async()=>{const i=S.inv.indexOf(LASTI);if(i<0)return;const car=(S.cars||[]).filter(c=>!c.pl).sort((a,b)=>b.inc-a.inc)[0];if(!car){toast('Нет свободной машины. Открой контейнер');A.cars();return}if(initData){const d=await act('plate_on',{c:S.cars.indexOf(car),i,num:S.inv[i].num});if(d){LASTI=null;showAct()}return}settle();car.pl=S.inv.splice(i,1)[0];LASTI=null;ui();showAct();toast('Номер на '+car.e+' '+car.n+' · '+fmt(car.inc*(PM[car.pl.r]||1))+'/ч')};
 var CSOK=0,MOK=0;
 function ask(t,yes,lbl){let o=$('cf');if(o)o.remove();o=document.createElement('div');o.id='cf';o.innerHTML='<div class="cfb"><div class="cft"></div><div class="row"><button class="cl" data-n>Отмена</button><button class="cl cfy" data-y></button></div></div>';o.querySelector('.cft').textContent=t;o.querySelector('[data-y]').textContent=lbl||'Продать';o.querySelector('[data-n]').onclick=()=>o.remove();o.querySelector('[data-y]').onclick=()=>{o.remove();yes()};o.onclick=e=>{if(e.target===o)o.remove()};document.body.appendChild(o)}
 function daily(){
@@ -456,7 +483,7 @@ $('go').onclick=spin;$('bMenu').onclick=sMenu;
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{const t=b.dataset.t;if(t==='spin'){close();window.scrollTo({top:0,behavior:'smooth'})}else A[t]()});
 function cine(rar,num){const o=document.createElement('div');o.className='cine c'+rar;o.innerHTML='<div class="rays"></div><i class="ring"></i><i class="ring r2"></i><i class="ring r3"></i><div class="ct">'+(rar>=6?'АБСОЛЮТ':'СЕКРЕТ')+'</div><div class="cs">'+esc(num)+'</div>';for(let i=0;i<(rar>=6?60:40);i++){const s=document.createElement('b');s.style.cssText='left:'+Math.random()*100+'%;font-size:'+(10+Math.random()*16)+'px;animation-delay:'+Math.random()*1.5+'s;animation-duration:'+(1.5+Math.random()*2)+'s';s.textContent=rar>=6?'✦':(Math.random()<.5?'0':'1');o.appendChild(s)}o.onclick=()=>o.remove();document.body.appendChild(o);setTimeout(()=>o.remove(),rar>=6?4200:3000);try{navigator.vibrate&&navigator.vibrate(rar>=6?[80,60,80,60,300]:[60,40,60])}catch(e){}}
 function boom(c){const d=document.createElement('div');d.className='boom';for(let i=0;i<28;i++){const s=document.createElement('i');s.style.cssText='--x:'+((Math.random()-.5)*360)+'px;--y:'+(-Math.random()*320-40)+'px;background:'+c+';left:50%;top:45%;animation-delay:'+(Math.random()*.15)+'s';d.appendChild(s)}document.body.appendChild(d);setTimeout(()=>d.remove(),1400)}
-function welcome(){open(`<h2>Добро пожаловать в нАмерок</h2><p>Крути номера, собирай редкие, продавай на рынке и поднимайся в топе.</p><input class="inp" id="wn" maxlength="14" placeholder="Придумай ник" value="${esc(S.nick||'')}"><div class="inv"><span>🎰</span><span class="mp">Нажми «Крутить» — номер выпадает случайно</span></div><div class="inv"><span>💎</span><span class="mp">Дороже ставка — выше шанс на легенду и мифик</span></div><div class="inv"><span>🏪</span><span class="mp">${SRV==='on'?'Рынок и топ общие для всех игроков':'Прогресс хранится в этом браузере. Открой игру через Telegram, чтобы играть вместе со всеми'}</span></div><button class="cl" id="wgo">Играть</button>`);$('wgo').onclick=()=>{S.nick=$('wn').value.trim().slice(0,14)||S.nick;S.seen=1;save();close()}}
+function welcome(){open(`<h2>Добро пожаловать в нАмерок</h2><p>Крути номера, собирай редкие, продавай на рынке и поднимайся в топе.</p><input class="inp" id="wn" maxlength="14" placeholder="Придумай ник" value="${esc(S.nick||'')}"><div class="inv"><span>🎰</span><span class="mp">Нажми «Крутить» — номер выпадает случайно</span></div><div class="inv"><span>💎</span><span class="mp">Дороже ставка — выше шанс на легенду и мифик</span></div><div class="inv"><span>🏪</span><span class="mp">${SRV==='on'?'Рынок и топ общие для всех игроков':'Прогресс хранится в этом браузере. Открой игру через Telegram, чтобы играть вместе со всеми'}</span></div><button class="cl" id="wgo">Играть</button>`);$('wgo').onclick=()=>{S.nick=$('wn').value.trim().slice(0,14)||S.nick;S.seen=1;save();if(initData)act('prefs',{nick:S.nick,seen:1});close()}}
 setInterval(()=>{const d=$('srvd');if(d)d.textContent=SRV==='on'?'🟢':SRV==='err'?'🟠':'⚪'},2000);
 function fmtT(ms){const s=Math.max(0,Math.floor(ms/1000));return [Math.floor(s/3600),Math.floor(s%3600/60),s%60].map(n=>String(n).padStart(2,'0')).join(':')}
 setInterval(()=>{const e=$('luckT'),r=(S.luck||0)-T();e.textContent='🍀 Удача ×2 · '+(r>0?fmtT(r):'не активна');e.style.opacity=r>0?1:.55},1000);
