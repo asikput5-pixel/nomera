@@ -45,3 +45,6 @@ drop table if exists uniques;
 create table if not exists supply (kind text not null, region text not null, cap int not null, taken int not null default 0, primary key (kind, region));
 create table if not exists cfg (key text primary key, val jsonb);
 ```
+
+## Сезон и обнуление
+Сезон BETA-1 стартует при первом запросе к серверу и длится 2 дня 9 часов. В админке можно запустить новый сезон (название в поле текста, часы в поле числа), обнулить одного игрока по его Telegram ID или всех сразу (с подтверждением). При обнулении всех тираж секреток и абсолютов тоже сбрасывается.
