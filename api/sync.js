@@ -24,7 +24,19 @@ function verify(initData) {
   } catch { return null; }
 }
 
-async function getCfg() { const o = {}; (await sql`select key, val from cfg`).forEach((r) => { o[r.key] = r.val; }); return o; }
+async function getCfg() {
+  const o = {};
+  (await sql`select key, val from cfg`).forEach((r) => { o[r.key] = r.val; });
+  if (!o.season) {
+    // первый запуск: сезон BETA-1, до конца 2 дня 9 часов
+    const def = { name: 'BETA-1', end: Date.now() + (2 * 24 + 9) * 3600 * 1000 };
+    await sql`insert into cfg (key, val) values ('season', ${JSON.stringify(def)}::jsonb) on conflict (key) do nothing`;
+    const [r] = await sql`select val from cfg where key = 'season'`;
+    o.season = r ? r.val : def;
+  }
+  return o;
+}
+const pub = (c) => ({ msg: c.msg || '', off: !!c.off, season: c.season });
 const setCfg = (k, v) => sql`insert into cfg (key, val) values (${k}, ${JSON.stringify(v)}::jsonb) on conflict (key) do update set val = excluded.val`;
 
 async function persist(id, user, S, ver, isNew) {
@@ -120,6 +132,26 @@ async function adminOp(id, p) {
       if (p.reg) await sql`insert into supply (kind, region, cap) values (${kind}, ${String(p.reg).slice(0, 6)}, ${n}) on conflict (kind, region) do update set cap = ${n}`;
       else { await setCfg(p.op, n); await sql`update supply set cap = ${n} where kind = ${kind}`; }
       msg = 'Тираж обновлён'; break;
+    case 'wipe': {
+      const w = num(p.tg);
+      need(w, 'Введи Telegram ID игрока');
+      await sql`delete from market where seller = ${w}`;
+      await sql`delete from players where tg_id = ${w}`;
+      msg = 'Игрок ' + w + ' обнулён';
+      break;
+    }
+    case 'wipeall':
+      need(p.confirm === 'WIPE', 'Нужно подтверждение');
+      await sql`delete from market`;
+      await sql`delete from players`;
+      await sql`update supply set taken = 0`;
+      await sql`update feed set ev = null`;
+      msg = 'Все игроки обнулены';
+      break;
+    case 'season':
+      await setCfg('season', { name: String(p.msg || '').trim().slice(0, 20) || 'BETA-1', end: Date.now() + Math.max(1, n) * 3600 * 1000 });
+      msg = 'Сезон запущен';
+      break;
     case 'supply': return { ok: true, rows: await sql`select kind, region, cap, taken from supply order by kind, region` };
     default: throw new UErr('Неизвестная операция');
   }
@@ -137,7 +169,7 @@ export default async function handler(req, res) {
       if (action === 'load') {
         const [r] = await sql`select save, updated_at from players where tg_id = ${id}`;
         const cfg = await getCfg();
-        return res.json({ s: norm(r ? r.save : defaultState(user.first_name)), updatedAt: r ? num(r.updated_at) : 0, admin: isAdmin(id), cfg: { msg: cfg.msg || '', off: !!cfg.off } });
+        return res.json({ s: norm(r ? r.save : defaultState(user.first_name)), updatedAt: r ? num(r.updated_at) : 0, admin: isAdmin(id), cfg: pub(cfg) });
       }
       if (action === 'top') {
         const rows = await sql`select tg_id, name, cap, sp, lvl, cnt, ch, cl, cd from players order by cap desc limit 500`;
@@ -146,7 +178,7 @@ export default async function handler(req, res) {
       if (action === 'feed') {
         const [r] = await sql`select ev from feed where id = 1`;
         const cfg = await getCfg();
-        return res.json({ feed: r ? r.ev : null, cfg: { msg: cfg.msg || '', off: !!cfg.off } });
+        return res.json({ feed: r ? r.ev : null, cfg: pub(cfg) });
       }
       if (action === 'market') {
         const rows = await sql`select id, seller, seller_name, plate, r, price, sold from market where sold = false or seller = ${id} order by created_at desc limit 100`;
