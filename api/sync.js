@@ -28,8 +28,15 @@ export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
   const user = verify(req.headers['x-init-data'] || '');
   if (!user) return res.status(401).json({ error: 'unauthorized' });
-  const id = user.id;
+  const id = String(user.id);
   const action = req.query.action;
+
+  // Server-side allowlist: client-side PINs/localStorage are not trusted.
+  if (action === 'admin_check') {
+    const adminId = String(process.env.ADMIN_TG_ID || '');
+    const allowed = Boolean(adminId && id === adminId);
+    return res.status(allowed ? 200 : 403).json({ admin: allowed });
+  }
 
   try {
     if (req.method === 'GET') {
