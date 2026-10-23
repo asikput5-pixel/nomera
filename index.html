@@ -128,6 +128,15 @@ button:active{transform:scale(.97)}
 .cft{font-weight:700;margin-bottom:16px;line-height:1.5}
 .cfy{background:#3b1d24;color:#ff7a8f}
 .sh p.mh{text-align:left;margin:14px 0 8px;font-weight:800;color:var(--tx);font-size:13px}
+.act{margin:0}
+.act .go{flex:1;font-size:clamp(12px,3.8vw,15px);padding:18px 8px;white-space:normal;line-height:1.25}
+.gsell{background:linear-gradient(180deg,#34d98a,#1fa866);box-shadow:0 8px 24px #1fa86644}
+.gkeep{background:linear-gradient(180deg,#5a9bff,#3c78ea)}
+#go{font-size:clamp(12px,4vw,17px);white-space:nowrap;padding:20px 8px}
+.rar>div:first-child{flex:1;min-width:0}
+.rar #rval{white-space:nowrap;flex:none;font-size:clamp(15px,5vw,22px);margin-left:10px}
+.rar .dots{flex-wrap:nowrap}.rar .dots i{flex:1;min-width:6px;max-width:22px;width:auto}
+.rsub{display:block;font-weight:500;font-size:12px;color:var(--mut);margin-top:3px}
 </style>
 </head>
 <body>
@@ -141,7 +150,7 @@ button:active{transform:scale(.97)}
  <div class="rar"><div><b id="rname">Старт</b><div class="dots" id="dots"></div></div><span id="rval">—</span></div>
  <div class="stage">
   <div class="plate civil" id="plate"><div class="n" id="num">А 123 ВС</div><div class="reg" id="regbox">77<br>RUS</div></div>
-  <div class="rn" id="rn">Нажми «Крутить»</div><div class="rd" id="rd">Выбери страну, тип номера, регион и ставку</div><div class="row" id="act" style="display:none;margin-top:12px"><button class="mini" id="aSell">💰 Продать</button><button class="mini" id="aGar">📥 В инвентарь</button></div>
+  <div class="rn" id="rn">Нажми «Крутить»</div><div class="rd" id="rd">Выбери страну, тип номера, регион и ставку</div>
  </div>
  <div class="hist" id="hist"></div>
  <div class="sel">
@@ -150,6 +159,7 @@ button:active{transform:scale(.97)}
   <button id="bReg" aria-label="Регион">📍 Любой ▾</button>
  </div>
  <button class="mini" id="bBet"></button>
+ <div class="row act" id="act" style="display:none"><button class="go gsell" id="aSell">💰 Продать</button><button class="go gkeep" id="aGar">📥 Отложить в инвентарь</button></div>
  <button class="go" id="go"></button>
  <button class="mini" id="skipBtn" style="display:none">⏭ Пропустить анимацию</button>
  <div class="row"><button class="mini" id="bInv">🎒 Инвентарь</button><button class="mini" id="bDaily">🎁 Бонус дня</button></div>
@@ -227,11 +237,11 @@ function ui(){
  $('bCountry').textContent=COUNTRIES[S.country].f+' ▾';
  $('bReg').textContent='📍 '+(S.region||'Любой')+' ▾';
  $('bBet').textContent=BETS[S.bet].n+' · '+fmt(BETS[S.bet].p)+' ▾';
- $('go').textContent=(S.region?'📍 Крутить регион '+S.region:'Крутить')+' · '+fmt(cost());
+ $('go').textContent='Крутить'+(S.region?' 📍'+S.region:'')+' · '+fmt(cost());
  $('go').disabled=S.bal<cost();
  $('hist').innerHTML=S.hist.map(h=>`<span style="color:${RAR[h.r].c}">${h.num}</span>`).join('');
- const best=S.inv.reduce((a,b)=>Math.max(a,b.r),-1);
- $('rname').textContent=best<0?'Старт':RAR[best].n;$('rval').textContent=best<0?'—':fmt(RAR[best].v*(best>=5?1:BETS[S.bet].m));
+ const ld=LASTD||(S.hist&&S.hist[0]?{num:S.hist[0].num,r:S.hist[0].r,v:null}:null),best=ld?ld.r:-1;
+ $('rname').innerHTML=ld?'<span style="color:'+RAR[best].c+'">'+RAR[best].n+'</span><small class="rsub">'+esc(ld.num)+'</small>':'Старт';$('rval').textContent=ld&&ld.v!=null?fmt(ld.v):'—';
  $('rval').style.color=best<0?'':RAR[best].c;
  $('dots').innerHTML=Array.from({length:9},(_,i)=>`<i style="${i<=best*2?'background:'+RAR[best].c:''}"></i>`).join('');
  save()}
@@ -254,7 +264,7 @@ async function fin(c){
  $('rd').textContent='Оценка: '+fmt(val);
  S.inv.unshift(item);S.hist.unshift({num:item.num,r:rar});S.hist=S.hist.slice(0,12);S.cnt=S.cnt||[];S.cnt[rar]=(S.cnt[rar]||0)+1;if(S.as!=null&&S.as>=0&&rar<=S.as){S.inv.shift();S.bal+=val;$('rd').textContent='Автопродажа: +'+fmt(val)}
  S.xp+=10+rar*20;if(S.xp>=(S.lvl)*0+100*(1+(S.lvl>>5))){S.xp=0;S.lvl++;S.bal+=1000*S.lvl;toast('Уровень '+S.lvl+'! Бонус '+fmt(1000*S.lvl))}
- if(rar>=1)qa(1);LASTI=item;showAct();if(UTAKEN){const u=UTAKEN;UTAKEN=null;$('rd').textContent=RAR[u.r].n+' номер уже у игрока '+u.n+' — выпал мифик';toast(RAR[u.r].n+' может быть только у одного игрока')}busy=false;ui()}
+ if(rar>=1)qa(1);LASTD={num:item.num,r:rar,v:val};LASTI=item;showAct();if(UTAKEN){const u=UTAKEN;UTAKEN=null;$('rd').textContent=RAR[u.r].n+' номер уже у игрока '+u.n+' — выпал мифик';toast(RAR[u.r].n+' может быть только у одного игрока')}busy=false;ui()}
 
 function open(html){$('sh').innerHTML=html;$('sheet').classList.add('on')}
 function close(){$('sheet').classList.remove('on')}
@@ -399,7 +409,7 @@ async function spinSrv(){
  const tEnd=t0+(S.na?80:960);while(!SKIP&&Date.now()<tEnd)await new Promise(r=>setTimeout(r,30));
  clearInterval(iv);pl.classList.remove('spin');$('skipBtn').style.display='none';
  if(!d){busy=false;ui();return}
- const x=d.r,rar=x.rar;paint(x.p,rar);
+ const x=d.r,rar=x.rar;LASTD={num:x.item.num,r:rar,v:x.val};paint(x.p,rar);
  pl.classList.remove('pop');void pl.offsetWidth;pl.classList.add('pop');
  if(rar>=3)boom(RAR[rar].c);
  if(rar>=5){pl.classList.add('fx'+rar);if(!SKIP)cine(rar,x.item.num);LASTF=x.fid;topBanner('🏆 '+nick()+' выбил '+RAR[rar].n.toUpperCase()+' номер '+x.item.num+'!',RAR[rar].c)}
@@ -408,6 +418,7 @@ async function spinSrv(){
  if(S.lvl>lv)toast('Уровень '+S.lvl+'! Бонус '+fmt(1000*S.lvl));
  if(x.taken){$('rd').textContent='В регионе '+x.taken.n+' тираж '+RAR[x.taken.r].n.toLowerCase()+'х номеров исчерпан — выпал мифик';toast('Тираж в регионе исчерпан')}
  LASTI=x.sold?null:S.inv[0];showAct();busy=false;ui()}
+var LASTD=null;
 let SKIP=false,UP={i:-1,m:2},UPROT=0,UPBUSY=false;
 A.duel=async()=>{if(!initData){pg('Дуэли','Доступны в Telegram','<div class="inv">Открой игру через Telegram: дуэли идут только между настоящими игроками</div>');return}
  let d={open:[],mine:[]};try{d=await api('duels')}catch(e){}
@@ -492,7 +503,7 @@ function uClaim(r,num){if(DBH&&UID)DBH.collection('unique').doc(UN[r]).set({u:UI
 async function uniqRoll(r){if(!initData)return r;try{const d=await api('claim',{r});if(d.ok)return r;UTAKEN={r,n:d.holder||'другого игрока'};return 4}catch(e){return 4}}
 function announce(rar,num){const id=T();LASTF=id;topBanner('🏆 '+nick()+' выбил '+RAR[rar].n.toUpperCase()+' номер '+num+'!',RAR[rar].c);if(initData)api('announce',{r:rar,num,id}).catch(()=>{})}
 function topBanner(t,c){let e=$('ntf');if(!e){e=document.createElement('div');e.id='ntf';document.body.appendChild(e)}e.textContent=t;e.style.borderColor=c;e.style.boxShadow='0 8px 30px '+c+'66';e.classList.remove('on');void e.offsetWidth;e.classList.add('on');clearTimeout(tbT);tbT=setTimeout(()=>e.classList.remove('on'),3000)}
-function showAct(){const a=$('act');if(!LASTI||S.inv.indexOf(LASTI)<0){a.style.display='none';return}a.style.display='flex';$('aSell').textContent='💰 Продать '+fmt(LASTI.v)}
+function showAct(){const a=$('act'),on=!!LASTI&&S.inv.indexOf(LASTI)>=0;a.style.display=on?'flex':'none';$('go').style.display=on?'none':'';if(on){$('aSell').textContent='💰 Продать '+fmt(LASTI.v);$('skipBtn').style.display='none'}}
 $('aSell').onclick=()=>{const i0=S.inv.indexOf(LASTI);if(i0<0)return;const it=LASTI,go=async()=>{const i=S.inv.indexOf(it);if(i<0)return;if(initData){if(await act('sell',{i,num:it.num})){LASTI=null;showAct()}return}const x=S.inv.splice(i,1)[0];S.bal+=x.v;qa(2);LASTI=null;ui();showAct();toast('Продано за '+fmt(x.v))};if(it.r>=3)ask(RAR[it.r].n+' номер '+it.num+' — продать за '+fmt(it.v)+'?',go);else go()};
 $('aGar').onclick=async()=>{const i=S.inv.indexOf(LASTI);if(i<0)return;const car=(S.cars||[]).filter(c=>!c.pl).sort((a,b)=>b.inc-a.inc)[0];if(!car){toast('Нет свободной машины. Открой контейнер');A.cars();return}if(initData){const d=await act('plate_on',{c:S.cars.indexOf(car),i,num:S.inv[i].num});if(d){LASTI=null;showAct()}return}settle();car.pl=S.inv.splice(i,1)[0];LASTI=null;ui();showAct();toast('Номер на '+car.e+' '+car.n+' · '+fmt(car.inc*(PM[car.pl.r]||1))+'/ч')};
 var CSOK=0,MOK=0;
