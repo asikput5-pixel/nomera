@@ -349,11 +349,16 @@ A.cp=()=>{const u=location.href;try{navigator.clipboard.writeText(u).then(()=>to
 A.set=()=>pg('Настройки','',op('ta','','Анимация прокрутки',S.na?'выключена':'включена')+op('rs','','Сбросить прогресс','нельзя отменить','','on'));
 A.ta=()=>{S.na=!S.na;save();A.set()};
 A.rs=()=>{if(!confirm('Сбросить весь прогресс?'))return;try{localStorage.removeItem('namerok')}catch(e){}location.reload()};
-let AUTH=false;
+let IS_ADMIN=false;
 const av=()=>Math.max(0,parseInt($('av').value)||0);
-A.adm=()=>{if(!AUTH){pg('Админ-панель','Введи PIN (по умолчанию 1234)','<input class="inp" id="pin" type="password" inputmode="numeric" placeholder="PIN">'+op('al','','Войти'));return}
-pg('Админ-панель','Инвентарь: '+S.inv.length+' · множитель удачи ×'+(S.lm||1),'<input class="inp" id="av" inputmode="numeric" placeholder="Число для сумм, уровня, круток, PIN">'+op('a1','','Добавить к балансу')+op('a2','','Установить баланс')+op('a3','','Установить уровень')+op('a4','','Выдать бесплатные крутки')+op('a5','','Удача ×2 на 1 час')+op('a6','','Множитель удачи','из поля выше')+'<p style="margin-top:8px">Следующая крутка гарантированно:</p><div class="grid" style="grid-template-columns:repeat(3,1fr)">'+RAR.map((r,i)=>`<button data-a="af" data-v="${i}" style="color:${r.c}">${r.n}</button>`).join('')+'<button data-a="af" data-v="-1" style="color:var(--tx)">Случайная</button></div><p>Выдать номер в инвентарь:</p><div class="grid" style="grid-template-columns:repeat(3,1fr)">'+RAR.map((r,i)=>`<button data-a="gv" data-v="${i}" style="color:${r.c}">${r.n}</button>`).join('')+'</div>'+op('a7','','Очистить инвентарь')+op('a8','','Сбросить лимиты','бонус, рулетка, мойка, задания')+'<textarea class="inp" id="sv" placeholder="Сохранение JSON"></textarea>'+op('a9','','Экспорт сохранения')+op('a10','','Импорт сохранения')+op('a11','','Сменить PIN','из поля выше, от 4 цифр')+op('a12','','Выйти из админки'))};
-A.al=()=>{if($('pin').value===(S.pin||'1234')){AUTH=true;A.adm()}else toast('Неверный PIN')};
+A.adm=async()=>{
+  if(!IS_ADMIN){
+    try { IS_ADMIN=!!(await api('admin_check')).admin; }
+    catch(e){ toast('Админка доступна только владельцу. Открой игру через Telegram.'); return; }
+  }
+  if(!IS_ADMIN){toast('Нет доступа к админке');return}
+  pg('Админ-панель','Доступ подтверждён сервером · инвентарь: '+S.inv.length+' · множитель удачи ×'+(S.lm||1),'<input class="inp" id="av" inputmode="numeric" placeholder="Число для сумм, уровня, круток">'+op('a1','','Добавить к балансу')+op('a2','','Установить баланс')+op('a3','','Установить уровень')+op('a4','','Выдать бесплатные крутки')+op('a5','','Удача ×2 на 1 час')+op('a6','','Множитель удачи','из поля выше')+'<p style="margin-top:8px">Следующая крутка гарантированно:</p><div class="grid" style="grid-template-columns:repeat(3,1fr)">'+RAR.map((r,i)=>`<button data-a="af" data-v="${i}" style="color:${r.c}">${r.n}</button>`).join('')+'<button data-a="af" data-v="-1" style="color:var(--tx)">Случайная</button></div><p>Выдать номер в инвентарь:</p><div class="grid" style="grid-template-columns:repeat(3,1fr)">'+RAR.map((r,i)=>`<button data-a="gv" data-v="${i}" style="color:${r.c}">${r.n}</button>`).join('')+'</div>'+op('a7','','Очистить инвентарь')+op('a8','','Сбросить лимиты','бонус, рулетка, мойка, задания')+'<textarea class="inp" id="sv" placeholder="Сохранение JSON"></textarea>'+op('a9','','Экспорт сохранения')+op('a10','','Импорт сохранения')+op('a12','','Выйти из админки'));
+};
 A.a1=()=>{S.bal+=av();ui();toast('Баланс '+fmt(S.bal))};
 A.a2=()=>{S.bal=av();ui();toast('Баланс '+fmt(S.bal))};
 A.a3=()=>{S.lvl=Math.max(1,av());ui();toast('Уровень '+S.lvl)};
@@ -367,7 +372,7 @@ A.a8=()=>{S.daily=0;S.roul=0;S.wash=0;S.ev=0;S.q=null;save();toast('Лимиты
 A.a9=()=>{$('sv').value=JSON.stringify(S)};
 A.a10=()=>{try{S=Object.assign(S,JSON.parse($('sv').value));ui();toast('Сохранение загружено')}catch(e){toast('Неверный JSON')}};
 A.a11=()=>{const v=$('av').value.trim();if(v.length<4)return toast('PIN от 4 цифр');S.pin=v;save();toast('PIN изменён')};
-A.a12=()=>{AUTH=false;close()};
+A.a12=()=>{IS_ADMIN=false;close()};
 var DBH=null,UID=null,CAN=false,CFG={},TOP=[],LOTS=[],SRV='off',pushT;
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');
 const nick=()=>S.nick||('Игрок '+String(UID||'').slice(0,4));
@@ -382,6 +387,7 @@ async function srvInit(){
  const u=tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user;
  if(u){UID=String(u.id);if(!S.nick)S.nick=[u.first_name,u.last_name].filter(Boolean).join(' ').slice(0,14)}
  if(!initData){SRV='off';return}
+ try{IS_ADMIN=!!(await api('admin_check')).admin}catch(e){IS_ADMIN=false}
  try{const d=await api('load');if(d.save&&d.updatedAt>(S.ts||0)){S=Object.assign(S,d.save);ui();toast('Прогресс загружен с сервера')}SRV='on'}catch(e){SRV='err'}
  loadTop();setInterval(loadTop,30000);
  setInterval(async()=>{try{const f=(await api('feed')).feed;if(f&&f.id!==LASTF&&f.id!==FSEEN&&T()-f.id<15000){FSEEN=f.id;topBanner('🏆 '+f.n+' выбил '+RAR[f.r].n.toUpperCase()+' номер '+f.num+'!',RAR[f.r].c)}}catch(e){}},5000);
