@@ -1,11 +1,13 @@
 import { neon } from '@neondatabase/serverless';
 import crypto from 'node:crypto';
+import { ACT, UErr, defaultState, summary, givePlate, REGKEYS, norm } from '../lib/engine.js';
 
 const sql = neon(process.env.DATABASE_URL);
-const PM = [1, 1.2, 1.6, 2.5, 5, 12, 40];
+const ADMINS = (process.env.ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
+const isAdmin = (id) => ADMINS.includes(String(id));
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+const need = (c, m) => { if (!c) throw new UErr(m); };
 
-// Проверка подписи Telegram initData
 function verify(initData) {
   try {
     if (!initData || !process.env.BOT_TOKEN) return null;
@@ -19,40 +21,132 @@ function verify(initData) {
     if (h.length !== hash.length || !crypto.timingSafeEqual(Buffer.from(h), Buffer.from(hash))) return null;
     if (Date.now() / 1000 - num(p.get('auth_date')) > 86400) return null;
     return JSON.parse(p.get('user'));
-  } catch {
-    return null;
+  } catch { return null; }
+}
+
+async function getCfg() { const o = {}; (await sql`select key, val from cfg`).forEach((r) => { o[r.key] = r.val; }); return o; }
+const setCfg = (k, v) => sql`insert into cfg (key, val) values (${k}, ${JSON.stringify(v)}::jsonb) on conflict (key) do update set val = excluded.val`;
+
+async function persist(id, user, S, ver, isNew) {
+  const m = summary(S), now = Math.max(Date.now(), ver + 1);
+  const name = String(S.nick || user.first_name || 'Игрок').slice(0, 14), raw = JSON.stringify(S), cnt = JSON.stringify(m.cnt);
+  if (isNew) {
+    const g = await sql`insert into players (tg_id, name, save, cap, sp, lvl, cnt, ch, cl, cd, updated_at) values (${id}, ${name}, ${raw}::jsonb, ${m.cap}, ${m.sp}, ${m.lvl}, ${cnt}::jsonb, ${m.ch}, ${m.cl}, ${m.cd}, ${now}) on conflict (tg_id) do nothing returning tg_id`;
+    return g.length ? now : 0;
   }
+  const g = await sql`update players set name = ${name}, save = ${raw}::jsonb, cap = ${m.cap}, sp = ${m.sp}, lvl = ${m.lvl}, cnt = ${cnt}::jsonb, ch = ${m.ch}, cl = ${m.cl}, cd = ${m.cd}, updated_at = ${now} where tg_id = ${id} and updated_at = ${ver} returning tg_id`;
+  return g.length ? now : 0;
+}
+
+async function runAct(id, user, name, p) {
+  const cfg = await getCfg();
+  if (cfg.off && !isAdmin(id) && name !== 'prefs') throw new UErr('Технические работы на сервере');
+  let claimed = null, lot = null, out = {};
+  for (let t = 0; t < 4; t++) {
+    const [row] = await sql`select save, updated_at from players where tg_id = ${id}`;
+    const S = norm(row ? row.save : defaultState(user.first_name)), ver = row ? num(row.updated_at) : 0;
+    const c = {
+      now: Date.now(), day: new Date().toISOString().slice(0, 10), lm: num(cfg.lm, 1) || 1,
+      claim: async (r, region) => {
+        const kind = r === 6 ? 'absolute' : 'secret';
+        const cap = r === 6 ? num(cfg.capA, 5) : (cfg.capS != null ? num(cfg.capS) : 15 + Math.floor(Math.random() * 6));
+        await sql`insert into supply (kind, region, cap) values (${kind}, ${region}, ${cap}) on conflict do nothing`;
+        const g = await sql`update supply set taken = taken + 1 where kind = ${kind} and region = ${region} and taken < cap returning cap, taken`;
+        return g.length ? { ok: true, left: g[0].cap - g[0].taken } : { ok: false };
+      },
+      announce: async (r, numb, left) => {
+        const evId = Date.now();
+        await sql`insert into feed (id, ev) values (1, ${JSON.stringify({ id: evId, r, n: S.nick || user.first_name || 'Игрок', num: numb, left })}::jsonb) on conflict (id) do update set ev = excluded.ev`;
+        return evId;
+      },
+      clanName: async (n) => { const [r] = await sql`select cl from players where lower(cl) = lower(${n}) and cl <> '' limit 1`; return r ? r.cl : null; },
+    };
+    if (name === 'm_list') {
+      const x = S.inv[num(p.i)], price = Math.round(num(p.price));
+      need(x && x.num === p.num, 'Номер не найден'); need(price >= 1 && price <= 1e11, 'Неверная цена');
+      const [n] = await sql`select count(*)::int as n from market where seller = ${id} and sold = false`;
+      need(n.n < 20, 'Лимит: 20 лотов');
+      S.inv.splice(num(p.i), 1); lot = { plate: { num: x.num, r: x.r, v: x.v, cls: x.cls }, price }; out = { msg: 'Выставлено на рынок' };
+    } else if (name === 'm_buy') {
+      if (!claimed) {
+        const [l] = await sql`select price from market where id = ${num(p.id)} and sold = false and seller <> ${id}`;
+        need(l, 'Лот уже куплен'); need(S.bal >= num(l.price), 'Не хватает денег');
+        const g = await sql`update market set sold = true, buyer = ${id} where id = ${num(p.id)} and sold = false and seller <> ${id} returning plate, price`;
+        need(g.length, 'Лот уже куплен'); claimed = g[0];
+      }
+      S.bal -= num(claimed.price); S.inv.unshift(claimed.plate); out = { msg: 'Куплено' };
+    } else if (name === 'm_claim') {
+      if (!claimed) { const g = await sql`delete from market where id = ${num(p.id)} and seller = ${id} and sold = true returning price`; need(g.length, 'Нет денег для получения'); claimed = g[0]; }
+      S.bal += Math.round(num(claimed.price) * 0.95); out = { msg: 'Деньги получены' };
+    } else if (name === 'm_cancel') {
+      if (!claimed) { const g = await sql`delete from market where id = ${num(p.id)} and seller = ${id} and sold = false returning plate`; need(g.length, 'Лот уже продан'); claimed = g[0]; }
+      S.inv.unshift(claimed.plate); out = { msg: 'Лот снят' };
+    } else {
+      need(ACT[name], 'Неизвестное действие');
+      out = (await ACT[name](S, p || {}, c)) || {};
+    }
+    const saved = await persist(id, user, S, ver, !row);
+    if (!saved) continue;
+    if (lot) await sql`insert into market (seller, seller_name, plate, r, price, created_at) values (${id}, ${String(S.nick || user.first_name || 'Игрок').slice(0, 14)}, ${JSON.stringify(lot.plate)}::jsonb, ${lot.plate.r}, ${lot.price}, ${Date.now()})`;
+    return { ok: true, s: S, updatedAt: saved, msg: out.msg, r: out.r };
+  }
+  throw new UErr('Сервер занят, попробуй ещё раз');
+}
+
+async function mutate(tg, fn) {
+  for (let t = 0; t < 4; t++) {
+    const [row] = await sql`select save, updated_at from players where tg_id = ${tg}`;
+    need(row, 'Игрок не найден');
+    const S = norm(row.save); fn(S);
+    if (await persist(tg, {}, S, num(row.updated_at), false)) return;
+  }
+  throw new UErr('Занято, повтори');
+}
+
+async function adminOp(id, p) {
+  need(isAdmin(id), 'Нет доступа');
+  const tg = p.tg ? num(p.tg) : id, n = num(p.n);
+  let msg = 'Готово';
+  const kind = p.op === 'capA' ? 'absolute' : 'secret';
+  switch (p.op) {
+    case 'money': await mutate(tg, (S) => { S.bal += n; }); msg = 'Выдано ' + n + ' ₽'; break;
+    case 'level': await mutate(tg, (S) => { S.lvl = Math.max(1, n); }); break;
+    case 'free': await mutate(tg, (S) => { S.free = (S.free || 0) + n; }); break;
+    case 'plate': await mutate(tg, (S) => givePlate(S, Math.min(6, Math.max(0, num(p.r))), REGKEYS.includes(p.reg) ? p.reg : undefined)); msg = 'Номер выдан'; break;
+    case 'msg': await setCfg('msg', String(p.msg || '').slice(0, 120)); break;
+    case 'maint': { const c = await getCfg(); await setCfg('off', !c.off); msg = !c.off ? 'Тех. работы включены' : 'Тех. работы выключены'; break; }
+    case 'lm': await setCfg('lm', Math.max(1, n || 1)); break;
+    case 'capS': case 'capA':
+      if (p.reg) await sql`insert into supply (kind, region, cap) values (${kind}, ${String(p.reg).slice(0, 6)}, ${n}) on conflict (kind, region) do update set cap = ${n}`;
+      else { await setCfg(p.op, n); await sql`update supply set cap = ${n} where kind = ${kind}`; }
+      msg = 'Тираж обновлён'; break;
+    case 'supply': return { ok: true, rows: await sql`select kind, region, cap, taken from supply order by kind, region` };
+    default: throw new UErr('Неизвестная операция');
+  }
+  const [r] = await sql`select save, updated_at from players where tg_id = ${id}`;
+  return { ok: true, msg, s: norm(r ? r.save : defaultState('')), updatedAt: r ? num(r.updated_at) : 0 };
 }
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
   const user = verify(req.headers['x-init-data'] || '');
   if (!user) return res.status(401).json({ error: 'unauthorized' });
-  const id = String(user.id);
-  const action = req.query.action;
-
-  // Server-side allowlist: client-side PINs/localStorage are not trusted.
-  if (action === 'admin_check') {
-    const adminId = String(process.env.ADMIN_TG_ID || '');
-    const allowed = Boolean(adminId && id === adminId);
-    return res.status(allowed ? 200 : 403).json({ admin: allowed });
-  }
-
+  const id = user.id, action = req.query.action;
   try {
     if (req.method === 'GET') {
       if (action === 'load') {
         const [r] = await sql`select save, updated_at from players where tg_id = ${id}`;
-        return res.json(r ? { save: r.save, updatedAt: num(r.updated_at) } : { save: null });
+        const cfg = await getCfg();
+        return res.json({ s: norm(r ? r.save : defaultState(user.first_name)), updatedAt: r ? num(r.updated_at) : 0, admin: isAdmin(id), cfg: { msg: cfg.msg || '', off: !!cfg.off } });
       }
       if (action === 'top') {
         const rows = await sql`select tg_id, name, cap, sp, lvl, cnt, ch, cl, cd from players order by cap desc limit 500`;
-        return res.json({
-          top: rows.map((r) => ({ id: String(r.tg_id), n: r.name, cap: num(r.cap), sp: r.sp, lvl: r.lvl, cnt: r.cnt, ch: num(r.ch), cl: r.cl, cd: num(r.cd) })),
-        });
+        return res.json({ top: rows.map((r) => ({ id: String(r.tg_id), n: r.name, cap: num(r.cap), sp: r.sp, lvl: r.lvl, cnt: r.cnt, ch: num(r.ch), cl: r.cl, cd: num(r.cd) })) });
       }
       if (action === 'feed') {
         const [r] = await sql`select ev from feed where id = 1`;
-        return res.json({ feed: r ? r.ev : null });
+        const cfg = await getCfg();
+        return res.json({ feed: r ? r.ev : null, cfg: { msg: cfg.msg || '', off: !!cfg.off } });
       }
       if (action === 'market') {
         const rows = await sql`select id, seller, seller_name, plate, r, price, sold from market where sold = false or seller = ${id} order by created_at desc limit 100`;
@@ -60,105 +154,20 @@ export default async function handler(req, res) {
       }
       return res.status(400).json({ error: 'bad action' });
     }
-
     if (req.method !== 'POST') return res.status(405).json({ error: 'method' });
     const b = req.body || {};
-
-    if (action === 'save') {
-      const s = b.save;
-      if (!s || typeof s !== 'object') return res.status(400).json({ error: 'bad save' });
-      const raw = JSON.stringify(s);
-      if (raw.length > 300000) return res.status(413).json({ error: 'too big' });
-      const inv = Array.isArray(s.inv) ? s.inv : [];
-      const cars = Array.isArray(s.cars) ? s.cars : [];
-      const cap = Math.round(num(s.bal) + inv.reduce((a, x) => a + num(x && x.v), 0));
-      const ch = Math.round(cars.reduce((a, c) => a + num(c && c.inc) * (c && c.pl ? PM[num(c.pl.r)] || 1 : 1), 0));
-      const hu = [...inv.map((x) => num(x && x.r)), ...cars.map((c) => (c && c.pl ? num(c.pl.r) : 0))].filter((r) => r >= 5);
-      const listed = await sql`select r from market where seller = ${id} and sold = false and r >= 5`;
-      listed.forEach((l) => hu.push(l.r));
-      const name = String(s.nick || user.first_name || 'Игрок').slice(0, 14);
-      const cl = String((s.clan && s.clan.n) || '').slice(0, 16);
-      const cd = num(s.clan && s.clan.d);
-      const ts = num(s.ts, Date.now());
-      await sql`
-        insert into players (tg_id, name, save, cap, sp, lvl, cnt, ch, cl, cd, hu, updated_at)
-        values (${id}, ${name}, ${raw}::jsonb, ${cap}, ${num(s.spins)}, ${num(s.lvl, 1)}, ${JSON.stringify(s.cnt || [])}::jsonb, ${ch}, ${cl}, ${cd}, ${JSON.stringify(hu)}::jsonb, ${ts})
-        on conflict (tg_id) do update set name = excluded.name, save = excluded.save, cap = excluded.cap, sp = excluded.sp,
-          lvl = excluded.lvl, cnt = excluded.cnt, ch = excluded.ch, cl = excluded.cl, cd = excluded.cd, hu = excluded.hu, updated_at = excluded.updated_at`;
+    if (action === 'act') {
+      if (b.name === 'adm') return res.json(await adminOp(id, b.p || {}));
+      return res.json(await runAct(id, user, String(b.name), b.p || {}));
+    }
+    if (action === 'reset') {
+      await sql`delete from market where seller = ${id} and sold = false`;
+      await sql`delete from players where tg_id = ${id}`;
       return res.json({ ok: true });
     }
-
-    if (action === 'claim') {
-      const r = num(b.r);
-      if (![5, 6].includes(r)) return res.status(400).json({ error: 'bad rarity' });
-      const kind = r === 6 ? 'absolute' : 'secret';
-      const now = Date.now();
-      const [u] = await sql`select holder, name, ts from uniques where kind = ${kind}`;
-      if (u) {
-        const mine = String(u.holder) === String(id);
-        const [h] = await sql`select hu from players where tg_id = ${u.holder}`;
-        const holds = h && Array.isArray(h.hu) && h.hu.includes(r);
-        if (mine && holds) return res.json({ ok: false, holder: 'ты' });
-        if (!mine && (now - num(u.ts) < 60000 || holds)) return res.json({ ok: false, holder: u.name });
-      }
-      const name = String(user.first_name || 'Игрок').slice(0, 14);
-      const got = await sql`
-        insert into uniques (kind, holder, name, num, ts) values (${kind}, ${id}, ${name}, '', ${now})
-        on conflict (kind) do update set holder = ${id}, name = ${name}, num = '', ts = ${now}
-        where uniques.holder is not distinct from ${u ? u.holder : null}::bigint
-        returning kind`;
-      return res.json(got.length ? { ok: true } : { ok: false, holder: 'другого игрока' });
-    }
-
-    if (action === 'announce') {
-      const r = num(b.r);
-      if (![5, 6].includes(r)) return res.status(400).json({ error: 'bad rarity' });
-      const kind = r === 6 ? 'absolute' : 'secret';
-      const [own] = await sql`select 1 as ok from uniques where kind = ${kind} and holder = ${id}`;
-      if (!own) return res.status(403).json({ error: 'not holder' });
-      const numStr = String(b.num || '').slice(0, 20);
-      const name = String(user.first_name || 'Игрок').slice(0, 14);
-      const ev = { id: num(b.id, Date.now()), r, n: name, num: numStr };
-      await sql`update uniques set num = ${numStr}, ts = ${Date.now()} where kind = ${kind}`;
-      await sql`insert into feed (id, ev) values (1, ${JSON.stringify(ev)}::jsonb) on conflict (id) do update set ev = excluded.ev`;
-      return res.json({ ok: true });
-    }
-
-    if (action === 'list') {
-      const p = b.plate || {};
-      const r = num(p.r, -1);
-      const price = Math.round(num(b.price));
-      if (r < 0 || r > 6 || price < 1 || price > 1e11 || !p.num) return res.status(400).json({ error: 'bad lot' });
-      const [c] = await sql`select count(*)::int as n from market where seller = ${id} and sold = false`;
-      if (c.n >= 20) return res.status(400).json({ error: 'limit' });
-      const plate = { num: String(p.num).slice(0, 20), r, v: Math.max(0, num(p.v)), cls: String(p.cls || 'civil').slice(0, 10) };
-      await sql`insert into market (seller, seller_name, plate, r, price, created_at) values (${id}, ${String(user.first_name || 'Игрок').slice(0, 14)}, ${JSON.stringify(plate)}::jsonb, ${r}, ${price}, ${Date.now()})`;
-      return res.json({ ok: true });
-    }
-
-    if (action === 'buy') {
-      const got = await sql`update market set sold = true, buyer = ${id} where id = ${num(b.id)} and sold = false and seller <> ${id} returning plate, r`;
-      if (!got.length) return res.json({ ok: false });
-      const l = got[0];
-      if (l.r >= 5) {
-        const kind = l.r === 6 ? 'absolute' : 'secret';
-        await sql`update uniques set holder = ${id}, name = ${String(user.first_name || 'Игрок').slice(0, 14)}, ts = ${Date.now()} where kind = ${kind}`;
-      }
-      return res.json({ ok: true, plate: l.plate });
-    }
-
-    if (action === 'claim_sold') {
-      const got = await sql`delete from market where id = ${num(b.id)} and seller = ${id} and sold = true returning price`;
-      return res.json(got.length ? { ok: true, price: num(got[0].price) } : { ok: false });
-    }
-
-    if (action === 'cancel') {
-      const got = await sql`delete from market where id = ${num(b.id)} and seller = ${id} and sold = false returning plate`;
-      return res.json(got.length ? { ok: true, plate: got[0].plate } : { ok: false });
-    }
-
     return res.status(400).json({ error: 'bad action' });
   } catch (e) {
+    if (e instanceof UErr) return res.json({ ok: false, err: e.message });
     console.error(e);
     return res.status(500).json({ error: 'server' });
   }
