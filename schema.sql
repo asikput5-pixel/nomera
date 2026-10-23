@@ -34,3 +34,15 @@ create table if not exists supply (
   primary key (kind, region)
 );
 create table if not exists cfg (key text primary key, val jsonb);
+create table if not exists duels (
+  id bigserial primary key,
+  creator bigint not null,
+  creator_name text,
+  stake numeric not null,
+  status text not null default 'open',
+  opponent bigint,
+  opp_name text,
+  winner bigint,
+  created_at bigint not null
+);
+create index if not exists duels_open_idx on duels (status, created_at desc);
