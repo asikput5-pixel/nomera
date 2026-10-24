@@ -1,6 +1,6 @@
 import { neon } from '@neondatabase/serverless';
 import crypto from 'node:crypto';
-import { ACT, UErr, defaultState, summary, givePlate, REGKEYS, norm } from '../lib/engine.js';
+import { ACT, UErr, defaultState, summary, givePlate, REGKEYS, norm, pmArr, weekId, grantWar } from '../lib/engine.js';
 
 const sql = neon(process.env.DATABASE_URL);
 const ADMINS = (process.env.ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -34,9 +34,16 @@ async function getCfg() {
     const [r] = await sql`select val from cfg where key = 'season'`;
     o.season = r ? r.val : def;
   }
+  const prev = weekId(Date.now() - 7 * 864e5);
+  if (o.warSettled !== prev) {
+    const [top] = await sql`select clan, pts from cw where week = ${prev} order by pts desc limit 1`;
+    let hist = o.warHist || [];
+    if (top && top.pts > 0 && !hist.some((h) => h.week === prev)) { hist = [...hist, { week: prev, clan: top.clan, pts: top.pts }].slice(-30); await setCfg('warHist', hist); o.warHist = hist; }
+    await setCfg('warSettled', prev); o.warSettled = prev;
+  }
   return o;
 }
-const pub = (c) => ({ msg: c.msg || '', off: !!c.off, season: c.season });
+const pub = (c) => ({ msg: c.msg || '', off: !!c.off, season: c.season, perk: c.perk || { c: 'BY', m: 2 }, hist: c.warHist || [] });
 const setCfg = (k, v) => sql`insert into cfg (key, val) values (${k}, ${JSON.stringify(v)}::jsonb) on conflict (key) do update set val = excluded.val`;
 
 async function persist(id, user, S, ver, isNew) {
@@ -53,15 +60,17 @@ async function persist(id, user, S, ver, isNew) {
 async function runAct(id, user, name, p) {
   const cfg = await getCfg();
   if (cfg.off && !isAdmin(id) && name !== 'prefs') throw new UErr('Технические работы на сервере');
-  let claimed = null, lot = null, duelNew = null, out = {};
+  let claimed = null, lot = null, duelNew = null, out = {}, refN = null;
   for (let t = 0; t < 4; t++) {
     const [row] = await sql`select save, updated_at from players where tg_id = ${id}`;
     const S = norm(row ? row.save : defaultState(user.first_name)), ver = row ? num(row.updated_at) : 0;
     const c = {
+      week: weekId(Date.now()), season: (cfg.season && cfg.season.name) || '', dc: (cfg.perk || { c: 'BY' }).c, dm: num((cfg.perk || { m: 2 }).m, 2),
+      warAdd: async (cl, pts) => { await sql`insert into cw (week, clan, pts) values (${weekId(Date.now())}, ${cl}, ${pts}) on conflict (week, clan) do update set pts = cw.pts + ${pts}`; },
       now: Date.now(), day: new Date().toISOString().slice(0, 10), lm: num(cfg.lm, 1) || 1,
       claim: async (r, region) => {
-        const kind = r === 6 ? 'absolute' : 'secret';
-        const cap = r === 6 ? num(cfg.capA, 5) : (cfg.capS != null ? num(cfg.capS) : 15 + Math.floor(Math.random() * 6));
+        const kind = r === 7 ? 'president' : r === 6 ? 'absolute' : 'secret';
+        const cap = r === 7 ? num(cfg.capP, 3) : r === 6 ? num(cfg.capA, 5) : (cfg.capS != null ? num(cfg.capS) : 15 + Math.floor(Math.random() * 6));
         await sql`insert into supply (kind, region, cap) values (${kind}, ${region}, ${cap}) on conflict do nothing`;
         const g = await sql`update supply set taken = taken + 1 where kind = ${kind} and region = ${region} and taken < cap returning cap, taken`;
         return g.length ? { ok: true, left: g[0].cap - g[0].taken } : { ok: false };
@@ -122,11 +131,15 @@ async function runAct(id, user, name, p) {
       need(ACT[name], 'Неизвестное действие');
       out = (await ACT[name](S, p || {}, c)) || {};
     }
+    const bonus = grantWar(S, cfg.warHist, Date.now());
+    if (refN === null) { const g = await sql`update refs set paid = true where inviter = ${id} and paid = false returning invitee`; refN = g.length; }
+    if (refN) { S.bal += refN * 200000; S.free = (S.free || 0) + refN * 20; }
+    S.pm = pmArr(Date.now());
     const saved = await persist(id, user, S, ver, !row);
     if (!saved) continue;
     if (duelNew) await sql`insert into duels (creator, creator_name, stake, created_at) values (${id}, ${String(S.nick || user.first_name || 'Игрок').slice(0, 14)}, ${duelNew}, ${Date.now()})`;
     if (lot) await sql`insert into market (seller, seller_name, plate, r, price, created_at) values (${id}, ${String(S.nick || user.first_name || 'Игрок').slice(0, 14)}, ${JSON.stringify(lot.plate)}::jsonb, ${lot.plate.r}, ${lot.price}, ${Date.now()})`;
-    return { ok: true, s: S, updatedAt: saved, msg: out.msg, r: out.r };
+    return { ok: true, s: S, updatedAt: saved, msg: out.msg, r: out.r, bonus: [bonus, refN ? 'Друзья пришли по твоей ссылке: +' + refN * 200000 + ' ₽ и +' + refN * 20 + ' круток' : null].filter(Boolean).join('\n') || null };
   }
   throw new UErr('Сервер занят, попробуй ещё раз');
 }
@@ -145,7 +158,7 @@ async function adminOp(id, p) {
   need(isAdmin(id), 'Нет доступа');
   const tg = p.tg ? num(p.tg) : id, n = num(p.n);
   let msg = 'Готово';
-  const kind = p.op === 'capA' ? 'absolute' : 'secret';
+  const kind = p.op === 'capA' ? 'absolute' : p.op === 'capP' ? 'president' : 'secret';
   switch (p.op) {
     case 'money': await mutate(tg, (S) => { S.bal += n; }); msg = 'Выдано ' + n + ' ₽'; break;
     case 'level': await mutate(tg, (S) => { S.lvl = Math.max(1, n); }); break;
@@ -154,7 +167,8 @@ async function adminOp(id, p) {
     case 'msg': await setCfg('msg', String(p.msg || '').slice(0, 120)); break;
     case 'maint': { const c = await getCfg(); await setCfg('off', !c.off); msg = !c.off ? 'Тех. работы включены' : 'Тех. работы выключены'; break; }
     case 'lm': await setCfg('lm', Math.max(1, n || 1)); break;
-    case 'capS': case 'capA':
+    case 'perk': await setCfg('perk', { c: String(p.reg || '').toUpperCase().slice(0, 2), m: Math.max(1, n || 1) }); msg = 'Страна дня обновлена'; break;
+    case 'capS': case 'capA': case 'capP':
       if (p.reg) await sql`insert into supply (kind, region, cap) values (${kind}, ${String(p.reg).slice(0, 6)}, ${n}) on conflict (kind, region) do update set cap = ${n}`;
       else { await setCfg(p.op, n); await sql`update supply set cap = ${n} where kind = ${kind}`; }
       msg = 'Тираж обновлён'; break;
@@ -197,7 +211,38 @@ export default async function handler(req, res) {
       if (action === 'load') {
         const [r] = await sql`select save, updated_at from players where tg_id = ${id}`;
         const cfg = await getCfg();
-        return res.json({ s: norm(r ? r.save : defaultState(user.first_name)), updatedAt: r ? num(r.updated_at) : 0, admin: isAdmin(id), cfg: pub(cfg) });
+        const ref = num(req.query.ref);
+        const S = norm(r ? r.save : defaultState(user.first_name));
+        let ver = r ? num(r.updated_at) : 0;
+        if (!r && ref && ref !== id) {
+          const [inv] = await sql`select tg_id from players where tg_id = ${ref}`;
+          if (inv) {
+            S.free += 100; S.bal += 300000;
+            const ok = await persist(id, user, S, 0, true);
+            if (ok) { ver = ok; await sql`insert into refs (invitee, inviter, created_at) values (${id}, ${ref}, ${Date.now()}) on conflict do nothing`; }
+          }
+        }
+        const [cnt] = await sql`select count(*)::int as n from refs where inviter = ${id}`;
+        return res.json({ s: { ...S, pm: pmArr(Date.now()) }, updatedAt: ver, admin: isAdmin(id), cfg: pub(cfg), refBase: process.env.BOT_LINK || '', refs: cnt.n });
+      }
+      if (action === 'reftop') {
+        const rows = await sql`select r.inviter, count(*)::int as c, max(p.name) as name from refs r left join players p on p.tg_id = r.inviter group by r.inviter order by c desc limit 20`;
+        return res.json({ top: rows.map((x) => ({ id: String(x.inviter), n: x.name || 'Игрок', c: x.c })) });
+      }
+      if (action === 'uniq') {
+        const cfg = await getCfg(), keys = [...REGKEYS, 'BY', 'KZ', 'US'];
+        const [cn] = await sql`select count(*)::int as n from supply`;
+        if (cn.n < keys.length * 3) {
+          const list = [];
+          for (const k of keys) {
+            list.push({ kind: 'secret', region: k, cap: cfg.capS != null ? num(cfg.capS) : 15 + Math.floor(Math.random() * 6) });
+            list.push({ kind: 'absolute', region: k, cap: num(cfg.capA, 5) });
+            list.push({ kind: 'president', region: k, cap: num(cfg.capP, 3) });
+          }
+          await sql`insert into supply (kind, region, cap) select kind, region, cap from jsonb_to_recordset(${JSON.stringify(list)}::jsonb) as t(kind text, region text, cap int) on conflict do nothing`;
+        }
+        const rows = await sql`select kind, region, cap, taken from supply order by region, kind`;
+        return res.json({ rows });
       }
       if (action === 'top') {
         const rows = await sql`select tg_id, name, cap, sp, lvl, cnt, ch, cl, cd from players order by cap desc limit 500`;
@@ -207,6 +252,11 @@ export default async function handler(req, res) {
         const [r] = await sql`select ev from feed where id = 1`;
         const cfg = await getCfg();
         return res.json({ feed: r ? r.ev : null, cfg: pub(cfg) });
+      }
+      if (action === 'war') {
+        const wk = weekId(Date.now()), cfg = await getCfg();
+        const rows = await sql`select clan, pts from cw where week = ${wk} order by pts desc limit 20`;
+        return res.json({ week: wk, end: Date.parse(wk) + 7 * 864e5, rows: rows.map((x) => ({ clan: x.clan, pts: num(x.pts) })), hist: (cfg.warHist || []).slice(-5).reverse() });
       }
       if (action === 'duels') {
         const open = await sql`select id, creator_name, stake from duels where status = 'open' and creator <> ${id} order by created_at desc limit 30`;
