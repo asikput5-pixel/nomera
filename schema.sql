@@ -46,3 +46,6 @@ create table if not exists duels (
   created_at bigint not null
 );
 create index if not exists duels_open_idx on duels (status, created_at desc);
+create table if not exists cw (week text not null, clan text not null, pts int not null default 0, primary key (week, clan));
+create table if not exists refs (invitee bigint primary key, inviter bigint not null, paid boolean not null default false, created_at bigint not null);
+create index if not exists refs_inviter_idx on refs (inviter);
