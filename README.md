@@ -69,3 +69,7 @@ create table if not exists cw (week text not null, clan text not null, pts int n
 create table if not exists refs (invitee bigint primary key, inviter bigint not null, paid boolean not null default false, created_at bigint not null);
 create index if not exists refs_inviter_idx on refs (inviter);
 ```
+
+## Обновление: престижи, цель недели, казна клана, переводы
+Выполни в Neon блок из конца `schema.sql` (alter players + таблицы `clans` и `goal`). Подробности про BOT_LINK и таблицы `cw`, `refs` выше.
+Новое: престиж (10 ступеней), общая цель недели (100 000 круток), полировка (300 нажатий по 3 000 ₽), круглая рулетка, батл пасс на 30 уровней, рамки для номеров, переводы по @username, казна клана, медали за топ-3 сезона, онлайн в настройках, ещё 6 стран, 34 региона без наценки, премиум-крутка с 5 уровня, элитная с 10, кланы с 10 уровня, комиссия при продаже 15%.
