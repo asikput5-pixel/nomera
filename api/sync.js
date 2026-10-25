@@ -24,6 +24,12 @@ function verify(initData) {
   } catch { return null; }
 }
 
+const clanLvl = (t) => [5e6, 25e6, 1e8, 5e8].filter((x) => t >= x).length;
+async function finalizeSeason(o) {
+  const top = await sql`select tg_id, name from players order by cap desc limit 3`;
+  const sh = [...(o.seasonHist || []), { name: o.season.name, top: top.map((x) => ({ id: String(x.tg_id), n: x.name })) }].slice(-20);
+  await setCfg('seasonHist', sh); await setCfg('seasonDone', o.season.name); o.seasonHist = sh; o.seasonDone = o.season.name;
+}
 async function getCfg() {
   const o = {};
   (await sql`select key, val from cfg`).forEach((r) => { o[r.key] = r.val; });
@@ -34,6 +40,7 @@ async function getCfg() {
     const [r] = await sql`select val from cfg where key = 'season'`;
     o.season = r ? r.val : def;
   }
+  if (o.season.end < Date.now() && o.seasonDone !== o.season.name) await finalizeSeason(o);
   const prev = weekId(Date.now() - 7 * 864e5);
   if (o.warSettled !== prev) {
     const [top] = await sql`select clan, pts from cw where week = ${prev} order by pts desc limit 1`;
@@ -47,24 +54,33 @@ const pub = (c) => ({ msg: c.msg || '', off: !!c.off, season: c.season, perk: c.
 const setCfg = (k, v) => sql`insert into cfg (key, val) values (${k}, ${JSON.stringify(v)}::jsonb) on conflict (key) do update set val = excluded.val`;
 
 async function persist(id, user, S, ver, isNew) {
-  const m = summary(S), now = Math.max(Date.now(), ver + 1);
+  const m = summary(S), now = Math.max(Date.now(), ver + 1), un = user && user.username ? String(user.username).toLowerCase() : null;
   const name = String(S.nick || user.first_name || 'Игрок').slice(0, 14), raw = JSON.stringify(S), cnt = JSON.stringify(m.cnt);
   if (isNew) {
-    const g = await sql`insert into players (tg_id, name, save, cap, sp, lvl, cnt, ch, cl, cd, updated_at) values (${id}, ${name}, ${raw}::jsonb, ${m.cap}, ${m.sp}, ${m.lvl}, ${cnt}::jsonb, ${m.ch}, ${m.cl}, ${m.cd}, ${now}) on conflict (tg_id) do nothing returning tg_id`;
+    const g = await sql`insert into players (tg_id, name, save, cap, sp, lvl, cnt, ch, cl, cd, updated_at, uname) values (${id}, ${name}, ${raw}::jsonb, ${m.cap}, ${m.sp}, ${m.lvl}, ${cnt}::jsonb, ${m.ch}, ${m.cl}, ${m.cd}, ${now}, ${un}) on conflict (tg_id) do nothing returning tg_id`;
     return g.length ? now : 0;
   }
-  const g = await sql`update players set name = ${name}, save = ${raw}::jsonb, cap = ${m.cap}, sp = ${m.sp}, lvl = ${m.lvl}, cnt = ${cnt}::jsonb, ch = ${m.ch}, cl = ${m.cl}, cd = ${m.cd}, updated_at = ${now} where tg_id = ${id} and updated_at = ${ver} returning tg_id`;
+  const g = await sql`update players set name = ${name}, save = ${raw}::jsonb, cap = ${m.cap}, sp = ${m.sp}, lvl = ${m.lvl}, cnt = ${cnt}::jsonb, ch = ${m.ch}, cl = ${m.cl}, cd = ${m.cd}, updated_at = ${now}, uname = coalesce(${un}, uname) where tg_id = ${id} and updated_at = ${ver} returning tg_id`;
   return g.length ? now : 0;
 }
 
 async function runAct(id, user, name, p) {
   const cfg = await getCfg();
   if (cfg.off && !isAdmin(id) && name !== 'prefs') throw new UErr('Технические работы на сервере');
-  let claimed = null, lot = null, duelNew = null, out = {}, refN = null;
+  let claimed = null, lot = null, duelNew = null, out = {}, refN = null, post = null;
   for (let t = 0; t < 4; t++) {
     const [row] = await sql`select save, updated_at from players where tg_id = ${id}`;
     const S = norm(row ? row.save : defaultState(user.first_name)), ver = row ? num(row.updated_at) : 0;
+    let clb = 1;
+    if (S.clan) { const [cr] = await sql`select treasury from clans where name = ${S.clan.n}`; if (cr) clb = 1 + 0.03 * clanLvl(num(cr.treasury)); }
+    let play = 0;
+    if (name === 'prestige') { const [pr] = await sql`select play from players where tg_id = ${id}`; play = pr ? num(pr.play) : 0; }
+    const wk0 = weekId(Date.now());
     const c = {
+      clb, play,
+      goalTarget: async () => num(cfg.goalT, 100000),
+      goalTotal: async () => { const [g] = await sql`select total from goal where week = ${wk0}`; return g ? num(g.total) : 0; },
+      goalAdd: async () => { await sql`insert into goal (week, total) values (${wk0}, 1) on conflict (week) do update set total = goal.total + 1`; },
       week: weekId(Date.now()), season: (cfg.season && cfg.season.name) || '', dc: (cfg.perk || { c: 'BY' }).c, dm: num((cfg.perk || { m: 2 }).m, 2),
       warAdd: async (cl, pts) => { await sql`insert into cw (week, clan, pts) values (${weekId(Date.now())}, ${cl}, ${pts}) on conflict (week, clan) do update set pts = cw.pts + ${pts}`; },
       now: Date.now(), day: new Date().toISOString().slice(0, 10), lm: num(cfg.lm, 1) || 1,
@@ -98,10 +114,24 @@ async function runAct(id, user, name, p) {
       S.bal -= num(claimed.price); S.inv.unshift(claimed.plate); out = { msg: 'Куплено' };
     } else if (name === 'm_claim') {
       if (!claimed) { const g = await sql`delete from market where id = ${num(p.id)} and seller = ${id} and sold = true returning price`; need(g.length, 'Нет денег для получения'); claimed = g[0]; }
-      S.bal += Math.round(num(claimed.price) * 0.95); out = { msg: 'Деньги получены' };
+      S.bal += Math.round(num(claimed.price) * 0.85); out = { msg: 'Деньги получены (комиссия 15%)' };
     } else if (name === 'm_cancel') {
       if (!claimed) { const g = await sql`delete from market where id = ${num(p.id)} and seller = ${id} and sold = false returning plate`; need(g.length, 'Лот уже продан'); claimed = g[0]; }
       S.inv.unshift(claimed.plate); out = { msg: 'Лот снят' };
+    } else if (name === 'transfer') {
+      const amt = Math.round(num(p.amount)), to = String(p.to || '').replace('@', '').trim().toLowerCase();
+      need(to.length >= 3, 'Введи юзернейм'); need(amt >= 1000 && amt <= 1e12, 'Минимальный перевод 1 000 ₽'); need(S.bal >= amt, 'Не хватает денег');
+      const [rc] = await sql`select tg_id from players where uname = ${to}`;
+      need(rc, 'Игрок с таким юзернеймом не найден'); need(String(rc.tg_id) !== String(id), 'Нельзя переводить себе');
+      S.bal -= amt;
+      post = async () => { try { await mutate(num(rc.tg_id), (R) => { R.bal += amt; R.note = { t: Date.now(), text: 'Перевод от @' + (user.username || 'игрока') + ': +' + amt + ' ₽' }; }); } catch (e) { await mutate(id, (X) => { X.bal += amt; }); } };
+      out = { msg: 'Переведено ' + amt + ' ₽ игроку @' + to };
+    } else if (name === 'clan_dep') {
+      const amt = num(p.amount);
+      need(S.clan, 'Ты не в клане'); need([1e5, 1e6, 1e7, 1e8].includes(amt), 'Неверная сумма'); need(S.bal >= amt, 'Не хватает денег');
+      const cn = S.clan.n; S.bal -= amt; S.clan.xp = (S.clan.xp || 0) + Math.round(amt / 1e5);
+      post = async () => { await sql`insert into clans (name, treasury) values (${cn}, ${amt}) on conflict (name) do update set treasury = clans.treasury + ${amt}`; };
+      out = { msg: 'Казна клана пополнена: +' + amt + ' ₽' };
     } else if (name === 'd_create') {
       const st = num(p.stake);
       need([1e4, 1e5, 1e6, 1e7].includes(st), 'Неверная ставка'); need(S.bal >= st, 'Не хватает денег');
@@ -112,13 +142,14 @@ async function runAct(id, user, name, p) {
       if (!claimed) {
         const [d] = await sql`select stake from duels where id = ${num(p.id)} and status = 'open' and creator <> ${id}`;
         need(d, 'Вызов уже принят'); need(S.bal >= num(d.stake), 'Не хватает денег');
-        const jw = Math.random() < 0.5, nm = String(S.nick || user.first_name || 'Игрок').slice(0, 14);
-        const g = await sql`update duels set status = 'done', opponent = ${id}, opp_name = ${nm}, winner = case when ${jw}::boolean then ${id}::bigint else creator end where id = ${num(p.id)} and status = 'open' and creator <> ${id} returning stake, winner`;
-        need(g.length, 'Вызов уже принят'); claimed = g[0];
+        const jw = Math.random() < 0.5;
+        const g = await sql`delete from duels where id = ${num(p.id)} and status = 'open' and creator <> ${id} returning stake, creator`;
+        need(g.length, 'Вызов уже принят'); claimed = { stake: num(g[0].stake), creator: g[0].creator, jw };
       }
-      const stake = num(claimed.stake), won = String(claimed.winner) === String(id);
-      S.bal -= stake; if (won) S.bal += Math.floor(stake * 1.9);
-      out = { msg: won ? 'Победа! +' + Math.floor(stake * 0.9) + ' ₽' : 'Поражение: −' + stake + ' ₽' };
+      const st = claimed.stake, won = claimed.jw;
+      S.bal -= st; if (won) S.bal += Math.floor(st * 1.9);
+      post = async () => { await mutate(num(claimed.creator), (R) => { if (!won) R.bal += Math.floor(st * 1.9); R.note = { t: Date.now(), text: won ? 'Дуэль проиграна: −' + st + ' ₽' : 'Дуэль выиграна: +' + Math.floor(st * 0.9) + ' ₽' }; }); };
+      out = { msg: won ? 'Победа! +' + Math.floor(st * 0.9) + ' ₽' : 'Поражение: −' + st + ' ₽' };
     } else if (name === 'd_cancel') {
       if (!claimed) { const g = await sql`delete from duels where id = ${num(p.id)} and creator = ${id} and status = 'open' returning stake`; need(g.length, 'Вызов уже принят'); claimed = g[0]; }
       S.bal += num(claimed.stake); out = { msg: 'Вызов отменён, ставка возвращена' };
@@ -132,11 +163,19 @@ async function runAct(id, user, name, p) {
       out = (await ACT[name](S, p || {}, c)) || {};
     }
     const bonus = grantWar(S, cfg.warHist, Date.now());
+    S.medalSeen = S.medalSeen || [];
+    for (const h of cfg.seasonHist || []) {
+      if (S.medalSeen.includes(h.name)) continue;
+      S.medalSeen.push(h.name);
+      const pl = h.top.findIndex((x) => x.id === String(id));
+      if (pl >= 0) S.badges = [...(S.badges || []), { k: 'medal', p: pl + 1, s: h.name }];
+    }
     if (refN === null) { const g = await sql`update refs set paid = true where inviter = ${id} and paid = false returning invitee`; refN = g.length; }
     if (refN) { S.bal += refN * 200000; S.free = (S.free || 0) + refN * 20; }
     S.pm = pmArr(Date.now());
     const saved = await persist(id, user, S, ver, !row);
     if (!saved) continue;
+    if (post) await post();
     if (duelNew) await sql`insert into duels (creator, creator_name, stake, created_at) values (${id}, ${String(S.nick || user.first_name || 'Игрок').slice(0, 14)}, ${duelNew}, ${Date.now()})`;
     if (lot) await sql`insert into market (seller, seller_name, plate, r, price, created_at) values (${id}, ${String(S.nick || user.first_name || 'Игрок').slice(0, 14)}, ${JSON.stringify(lot.plate)}::jsonb, ${lot.plate.r}, ${lot.price}, ${Date.now()})`;
     return { ok: true, s: S, updatedAt: saved, msg: out.msg, r: out.r, bonus: [bonus, refN ? 'Друзья пришли по твоей ссылке: +' + refN * 200000 + ' ₽ и +' + refN * 20 + ' круток' : null].filter(Boolean).join('\n') || null };
@@ -190,7 +229,12 @@ async function adminOp(id, p) {
       await sql`update feed set ev = null`;
       msg = 'Все игроки обнулены';
       break;
+    case 'prestige': await mutate(tg, (S) => { S.pr = Math.min(10, Math.max(0, n)); }); break;
+    case 'car': await mutate(tg, (S) => { S.cars = S.cars || []; S.cars.unshift({ n: 'Koenigsegg Jesko', e: '🏎️', r: 3, inc: 900000, pl: null }); }); break;
+    case 'frame': await mutate(tg, (S) => { S.frames = [...new Set([...(S.frames || []), Math.min(5, Math.max(0, n))])]; }); break;
+    case 'goalT': await setCfg('goalT', Math.max(1000, n)); break;
     case 'season':
+      { const c0 = await getCfg(); if (c0.seasonDone !== c0.season.name) await finalizeSeason(c0); }
       await setCfg('season', { name: String(p.msg || '').trim().slice(0, 20) || 'BETA-1', end: Date.now() + Math.max(1, n) * 3600 * 1000 });
       msg = 'Сезон запущен';
       break;
@@ -225,12 +269,25 @@ export default async function handler(req, res) {
         const [cnt] = await sql`select count(*)::int as n from refs where inviter = ${id}`;
         return res.json({ s: { ...S, pm: pmArr(Date.now()) }, updatedAt: ver, admin: isAdmin(id), cfg: pub(cfg), refBase: process.env.BOT_LINK || '', refs: cnt.n });
       }
+      if (action === 'me') {
+        const [pr] = await sql`select play from players where tg_id = ${id}`;
+        return res.json({ play: pr ? num(pr.play) : 0 });
+      }
+      if (action === 'goal') {
+        const cfg = await getCfg(), wk = weekId(Date.now());
+        const [g] = await sql`select total from goal where week = ${wk}`;
+        return res.json({ week: wk, total: g ? num(g.total) : 0, target: num(cfg.goalT, 100000) });
+      }
+      if (action === 'claninfo') {
+        const [r] = await sql`select treasury from clans where name = ${String(req.query.name || '')}`;
+        return res.json({ treasury: r ? num(r.treasury) : 0 });
+      }
       if (action === 'reftop') {
         const rows = await sql`select r.inviter, count(*)::int as c, max(p.name) as name from refs r left join players p on p.tg_id = r.inviter group by r.inviter order by c desc limit 20`;
         return res.json({ top: rows.map((x) => ({ id: String(x.inviter), n: x.name || 'Игрок', c: x.c })) });
       }
       if (action === 'uniq') {
-        const cfg = await getCfg(), keys = [...REGKEYS, 'BY', 'KZ', 'US'];
+        const cfg = await getCfg(), keys = [...REGKEYS, 'BY', 'KZ', 'US', 'UA', 'DE', 'AM', 'IT', 'CN', 'AE'];
         const [cn] = await sql`select count(*)::int as n from supply`;
         if (cn.n < keys.length * 3) {
           const list = [];
@@ -251,7 +308,8 @@ export default async function handler(req, res) {
       if (action === 'feed') {
         const [r] = await sql`select ev from feed where id = 1`;
         const cfg = await getCfg();
-        return res.json({ feed: r ? r.ev : null, cfg: pub(cfg) });
+        const [on] = await sql`select count(*)::int as n from players where seen > ${Date.now() - 120000}`;
+        return res.json({ feed: r ? r.ev : null, cfg: pub(cfg), online: on.n });
       }
       if (action === 'war') {
         const wk = weekId(Date.now()), cfg = await getCfg();
@@ -260,7 +318,7 @@ export default async function handler(req, res) {
       }
       if (action === 'duels') {
         const open = await sql`select id, creator_name, stake from duels where status = 'open' and creator <> ${id} order by created_at desc limit 30`;
-        const mine = await sql`select id, stake, status, winner, opp_name from duels where creator = ${id} order by created_at desc limit 20`;
+        const mine = await sql`select id, stake, status, winner, opp_name from duels where creator = ${id} and status = 'open' order by created_at desc limit 20`;
         return res.json({ open: open.map((d) => ({ id: String(d.id), n: d.creator_name, stake: num(d.stake) })), mine: mine.map((d) => ({ id: String(d.id), stake: num(d.stake), status: d.status, win: String(d.winner) === String(id), opp: d.opp_name })) });
       }
       if (action === 'market') {
@@ -274,6 +332,11 @@ export default async function handler(req, res) {
     if (action === 'act') {
       if (b.name === 'adm') return res.json(await adminOp(id, b.p || {}));
       return res.json(await runAct(id, user, String(b.name), b.p || {}));
+    }
+    if (action === 'beat') {
+      const now = Date.now();
+      await sql`update players set play = play + case when seen > ${now - 90000} then ${now} - seen else 0 end, seen = ${now} where tg_id = ${id}`;
+      return res.json({ ok: true });
     }
     if (action === 'reset') {
       await sql`delete from market where seller = ${id} and sold = false`;
