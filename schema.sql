@@ -55,3 +55,6 @@ alter table players add column if not exists play bigint not null default 0;
 create index if not exists players_uname_idx on players (uname);
 create table if not exists clans (name text primary key, treasury numeric not null default 0);
 create table if not exists goal (week text primary key, total int not null default 0);
+create table if not exists auction (id text primary key, plate jsonb not null, startp numeric not null default 5000000, cur numeric not null default 0, leader bigint, leader_name text, bids int not null default 0, endt bigint not null, status text not null default 'open');
+create table if not exists bids (id bigserial primary key, auction text not null, bidder bigint not null, name text, amount numeric not null, ts bigint not null);
+create index if not exists bids_auction_idx on bids (auction, amount desc);
