@@ -1,6 +1,6 @@
 import { neon } from '@neondatabase/serverless';
 import crypto from 'node:crypto';
-import { ACT, UErr, defaultState, summary, givePlate, REGKEYS, norm, pmArr, weekId, grantWar, bt, seasonReset, auctionPlate } from '../lib/engine.js';
+import { ACT, UErr, defaultState, summary, givePlate, REGKEYS, norm, pmArr, weekId, grantWar, bt, seasonReset, auctionPlate, plateParts, themeMatch, EVP } from '../lib/engine.js';
 
 const sql = neon(process.env.DATABASE_URL);
 const ADMINS = (process.env.ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -49,9 +49,32 @@ async function getCfg() {
     if (top && top.pts > 0 && !hist.some((h) => h.week === prev)) { hist = [...hist, { week: prev, clan: top.clan, pts: top.pts, top: top3.map((x) => ({ clan: x.clan, pts: num(x.pts) })) }].slice(-30); await setCfg('warHist', hist); o.warHist = hist; }
     await setCfg('warSettled', prev); o.warSettled = prev;
   }
+  if (!o.event) {
+    const base = Date.parse(weekId(Date.now())) - 3 * 36e5;
+    let st = base + 4 * 864e5 + 18 * 36e5;
+    if (st + 54 * 36e5 < Date.now()) st += 7 * 864e5;
+    const def = { id: String(st), name: 'Дубль-уикенд', theme: 'pair', mult: 3, start: st, end: st + 54 * 36e5 };
+    await sql`insert into cfg (key, val) values ('event', ${JSON.stringify(def)}::jsonb) on conflict (key) do nothing`;
+    const [r] = await sql`select val from cfg where key = 'event'`; o.event = r ? r.val : def;
+  }
+  if (o.event.end < Date.now() && o.evDone !== o.event.id) await settleEvent(o);
   return o;
 }
-const pub = (c) => ({ msg: c.msg || '', off: !!c.off, season: c.season, perk: c.perk || { c: 'BY', m: 2 }, hist: c.warHist || [] });
+async function settleEvent(o) {
+  const top = await sql`select tg, pts from evp where event = ${o.event.id} order by pts desc limit 10`;
+  const h = [...(o.evHist || []), { id: o.event.id, name: o.event.name, top: top.map((x) => ({ id: String(x.tg), pts: num(x.pts) })) }].slice(-10);
+  await setCfg('evHist', h); await setCfg('evDone', o.event.id); o.evHist = h; o.evDone = o.event.id;
+}
+async function tgSend(chat, text) {
+  try { await fetch('https://api.telegram.org/bot' + process.env.BOT_TOKEN + '/sendMessage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chat, text }) }); } catch (e) { /* игрок мог не запускать бота */ }
+}
+async function notifyPres(text) {
+  const ids = new Set(ADMINS);
+  if (process.env.ANNOUNCE_CHAT_ID) ids.add(process.env.ANNOUNCE_CHAT_ID);
+  try { (await sql`select tg_id from players order by seen desc limit 150`).forEach((r) => ids.add(String(r.tg_id))); } catch (e) { /* ignore */ }
+  await Promise.race([Promise.allSettled([...ids].map((i) => tgSend(i, text))), new Promise((r) => setTimeout(r, 4000))]);
+}
+const pub = (c) => ({ event: c.event, msg: c.msg || '', off: !!c.off, season: c.season, perk: c.perk || { c: 'BY', m: 2 }, hist: c.warHist || [] });
 const setCfg = (k, v) => sql`insert into cfg (key, val) values (${k}, ${JSON.stringify(v)}::jsonb) on conflict (key) do update set val = excluded.val`;
 
 async function persist(id, user, S, ver, isNew) {
@@ -95,7 +118,15 @@ async function runAct(id, user, name, p) {
     const wk0 = weekId(Date.now());
     const msk = new Date(Date.now() + 3 * 36e5), wm = msk.getUTCDay() === 6 && msk.getUTCHours() >= 19 && msk.getUTCHours() < 21 ? 3 : 1;
     const c = {
-      clb, play, wm,
+      clb, play, wm, event: cfg.event,
+      evAdd: async (it, rar) => {
+        const e = cfg.event, now = Date.now();
+        if (!e || now < e.start || now >= e.end) return null;
+        const themed = themeMatch(e.theme, plateParts(it)), add = Math.round(EVP[rar] * (themed ? num(e.mult, 1) : 1));
+        const nm = String(S.nick || user.first_name || 'Игрок').slice(0, 14);
+        await sql`insert into evp (event, tg, name, pts) values (${e.id}, ${id}, ${nm}, ${add}) on conflict (event, tg) do update set pts = evp.pts + ${add}, name = ${nm}`;
+        return { id: e.id, add, themed };
+      },
       goalTarget: async () => num(cfg.goalT, 100000),
       goalTotal: async () => { const [g] = await sql`select total from goal where week = ${wk0}`; return g ? num(g.total) : 0; },
       goalAdd: async () => { await sql`insert into goal (week, total) values (${wk0}, 1) on conflict (week) do update set total = goal.total + 1`; },
@@ -111,7 +142,10 @@ async function runAct(id, user, name, p) {
       },
       announce: async (r, numb, left) => {
         const evId = Date.now();
-        await sql`insert into feed (id, ev) values (1, ${JSON.stringify({ id: evId, r, n: S.nick || user.first_name || 'Игрок', num: numb, left })}::jsonb) on conflict (id) do update set ev = excluded.ev`;
+        const who = S.nick || user.first_name || 'Игрок';
+        await sql`insert into feed (id, ev) values (1, ${JSON.stringify({ id: evId, r, n: who, num: numb, left })}::jsonb) on conflict (id) do update set ev = excluded.ev`;
+        await sql`insert into drops (tg, name, r, num, ts) values (${id}, ${who}, ${r}, ${numb}, ${evId})`;
+        if (r === 7) await notifyPres('👑 ' + who + ' выбил ПРЕЗИДЕНТСКИЙ номер ' + numb + '!' + (left != null ? ' Осталось в регионе: ' + left : ''));
         return evId;
       },
       clanName: async (n) => { const [r] = await sql`select cl from players where lower(cl) = lower(${n}) and cl <> '' limit 1`; return r ? r.cl : null; },
@@ -136,6 +170,21 @@ async function runAct(id, user, name, p) {
     } else if (name === 'm_cancel') {
       if (!claimed) { const g = await sql`delete from market where id = ${num(p.id)} and seller = ${id} and sold = false returning plate`; need(g.length, 'Лот уже продан'); claimed = g[0]; }
       S.inv.unshift(claimed.plate); out = { msg: 'Лот снят' };
+    } else if (name === 'promo') {
+      const code = String(p.code || '').trim().toUpperCase().slice(0, 24);
+      need(code, 'Введи промокод');
+      if (!claimed) {
+        const [pr] = await sql`select reward, uses, used from promos where code = ${code}`;
+        need(pr, 'Промокод не найден');
+        const ins = await sql`insert into promo_uses (code, tg) values (${code}, ${id}) on conflict do nothing returning tg`;
+        need(ins.length, 'Ты уже использовал этот промокод');
+        const up = await sql`update promos set used = used + 1 where code = ${code} and used < uses returning reward`;
+        if (!up.length) { await sql`delete from promo_uses where code = ${code} and tg = ${id}`; throw new UErr('Промокод закончился'); }
+        claimed = up[0].reward;
+      }
+      S.bal += num(claimed.bal); S.free = (S.free || 0) + num(claimed.free);
+      if (num(claimed.vip)) S.vip = Math.max(Date.now(), S.vip || 0) + num(claimed.vip) * 864e5;
+      out = { msg: 'Промокод активирован' };
     } else if (name === 'transfer') {
       const amt = Math.round(num(p.amount)), to = String(p.to || '').replace('@', '').trim().toLowerCase();
       need(to.length >= 3, 'Введи юзернейм'); need(amt >= 1000 && amt <= 1e12, 'Минимальный перевод 1 000 ₽'); need(S.bal >= amt, 'Не хватает денег');
@@ -200,6 +249,7 @@ async function runAct(id, user, name, p) {
     }
     if (row && cfg.epoch && S.epoch !== cfg.epoch) seasonReset(S, cfg.epoch, (cfg.season && cfg.season.name) || '');
     if (!row && cfg.epoch) S.epoch = cfg.epoch;
+    let evMsg = null;
     const bonus = grantWar(S, cfg.warHist, Date.now());
     S.medalSeen = S.medalSeen || [];
     for (const h of cfg.seasonHist || []) {
@@ -207,6 +257,17 @@ async function runAct(id, user, name, p) {
       S.medalSeen.push(h.name);
       const pl = h.top.findIndex((x) => x.id === String(id));
       if (pl >= 0) S.badges = [...(S.badges || []), { k: 'medal', p: pl + 1, s: h.name }];
+    }
+    S.evSeen = S.evSeen || [];
+    for (const h of cfg.evHist || []) {
+      if (S.evSeen.includes(h.id)) continue;
+      S.evSeen.push(h.id);
+      const pl = h.top.findIndex((x) => x.id === String(id));
+      if (pl < 0) continue;
+      const R = pl === 0 ? [1e8, 300] : pl === 1 ? [6e7, 200] : pl === 2 ? [4e7, 150] : [15e6, 75];
+      S.bal += R[0]; S.free = (S.free || 0) + R[1];
+      if (pl < 3) { S.evWins = (S.evWins || 0) + 1; if (S.evWins === 3) S.badges = [...(S.badges || []), { k: 'evc' }]; }
+      evMsg = 'Ивент «' + h.name + '»: ' + (pl + 1) + ' место! +' + R[0] + ' ₽ и ' + R[1] + ' круток';
     }
     if (refN === null) { const g = await sql`update refs set paid = true where inviter = ${id} and paid = false returning invitee`; refN = g.length; }
     if (refN) { S.bal += refN * 200000; S.free = (S.free || 0) + refN * 20; }
@@ -216,7 +277,7 @@ async function runAct(id, user, name, p) {
     if (post) await post();
     if (duelNew) await sql`insert into duels (creator, creator_name, stake, created_at) values (${id}, ${String(S.nick || user.first_name || 'Игрок').slice(0, 14)}, ${duelNew}, ${Date.now()})`;
     if (lot) await sql`insert into market (seller, seller_name, plate, r, price, created_at) values (${id}, ${String(S.nick || user.first_name || 'Игрок').slice(0, 14)}, ${JSON.stringify(lot.plate)}::jsonb, ${lot.plate.r}, ${lot.price}, ${Date.now()})`;
-    return { ok: true, s: S, updatedAt: saved, msg: out.msg, r: out.r, bonus: [bonus, refN ? 'Друзья пришли по твоей ссылке: +' + refN * 200000 + ' ₽ и +' + refN * 20 + ' круток' : null].filter(Boolean).join('\n') || null };
+    return { ok: true, s: S, updatedAt: saved, msg: out.msg, r: out.r, bonus: [bonus, evMsg, refN ? 'Друзья пришли по твоей ссылке: +' + refN * 200000 + ' ₽ и +' + refN * 20 + ' круток' : null].filter(Boolean).join('\n') || null };
   }
   throw new UErr('Сервер занят, попробуй ещё раз');
 }
@@ -288,6 +349,25 @@ async function adminOp(id, p) {
       await setCfg('season', { name: String(p.msg || '').trim().slice(0, 20) || 'BETA-1', end: Date.now() + Math.max(1, n) * 3600 * 1000 });
       msg = 'Сезон запущен';
       break;
+    case 'promoNew': {
+      const code = String(p.code || '').trim().toUpperCase().slice(0, 24);
+      need(code.length >= 3, 'Код от 3 символов');
+      const reward = { bal: Math.max(0, num(p.bal)), free: Math.max(0, num(p.free)), vip: Math.max(0, num(p.vip)) };
+      await sql`insert into promos (code, reward, uses) values (${code}, ${JSON.stringify(reward)}::jsonb, ${Math.max(1, num(p.uses, 1))}) on conflict (code) do update set reward = excluded.reward, uses = excluded.uses`;
+      msg = 'Промокод создан';
+      break;
+    }
+    case 'promos': return { ok: true, rows: await sql`select code, used, uses from promos order by code limit 30` };
+    case 'drops': return { ok: true, rows: await sql`select name, r, num, ts from drops order by id desc limit 20` };
+    case 'event': {
+      const c0 = await getCfg();
+      if (c0.evDone !== c0.event.id) await settleEvent(c0);
+      const st = Date.now();
+      await setCfg('event', { id: String(st), name: String(p.name || 'Ивент').slice(0, 30), theme: String(p.theme || 'pair').slice(0, 10), mult: Math.max(1, num(p.mult, 3)), start: st, end: st + Math.max(1, num(p.hours, 48)) * 36e5 });
+      msg = 'Ивент запущен';
+      break;
+    }
+    case 'vip': await mutate(tg, (S) => { S.vip = Math.max(Date.now(), S.vip || 0) + Math.max(1, n) * 864e5; }); msg = 'VIP выдан'; break;
     case 'supply': return { ok: true, rows: await sql`select kind, region, cap, taken from supply order by kind, region` };
     default: throw new UErr('Неизвестная операция');
   }
@@ -325,6 +405,13 @@ export default async function handler(req, res) {
         const bidsR = lot ? await sql`select name, amount from bids where auction = ${lot.id} order by amount desc limit 12` : [];
         const past = await sql`select plate, leader_name, cur from auction where status = 'done' and leader is not null order by endt desc limit 8`;
         return res.json({ lot: lot ? { plate: lot.plate, startp: num(lot.startp), cur: num(lot.cur), leader: lot.leader_name, n: lot.bids, end: num(lot.endt) } : null, bids: bidsR.map((b) => ({ name: b.name, amount: num(b.amount) })), past: past.map((x) => ({ plate: x.plate, name: x.leader_name, cur: num(x.cur) })), next: w.start });
+      }
+      if (action === 'event') {
+        const cfg = await getCfg(), ev = cfg.event;
+        const [m] = await sql`select pts from evp where event = ${ev.id} and tg = ${id}`;
+        const mp = m ? num(m.pts) : 0;
+        const [pl] = await sql`select count(*)::int as n from evp where event = ${ev.id} and pts > ${mp}`;
+        return res.json({ ev, my: mp, place: mp > 0 ? pl.n + 1 : 0 });
       }
       if (action === 'me') {
         const [pr] = await sql`select play from players where tg_id = ${id}`;
