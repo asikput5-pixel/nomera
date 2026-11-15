@@ -58,3 +58,7 @@ create table if not exists goal (week text primary key, total int not null defau
 create table if not exists auction (id text primary key, plate jsonb not null, startp numeric not null default 5000000, cur numeric not null default 0, leader bigint, leader_name text, bids int not null default 0, endt bigint not null, status text not null default 'open');
 create table if not exists bids (id bigserial primary key, auction text not null, bidder bigint not null, name text, amount numeric not null, ts bigint not null);
 create index if not exists bids_auction_idx on bids (auction, amount desc);
+create table if not exists evp (event text not null, tg bigint not null, name text, pts int not null default 0, primary key (event, tg));
+create table if not exists promos (code text primary key, reward jsonb not null, uses int not null default 1, used int not null default 0);
+create table if not exists promo_uses (code text not null, tg bigint not null, primary key (code, tg));
+create table if not exists drops (id bigserial primary key, tg bigint, name text, r int, num text, ts bigint);
